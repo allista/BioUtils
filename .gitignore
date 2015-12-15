@@ -1,3 +1,9 @@
 *.pyc
 *~
+*.gb
+*.aln
+*.fa*
+*.nex
+*.ods
+
 /build/**
