@@ -1,0 +1,131 @@
+#!/usr/bin/python
+
+# Copyright (C) 2012 Allis Tauri <allista@gmail.com>
+# 
+# degen_primer is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# indicator_gddccontrol is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See the GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along
+# with this program.  If not, see <http://www.gnu.org/licenses/>.
+'''
+Created on Dec 10, 2012
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import os
+import re
+import sys
+import csv
+import argparse
+
+from Bio import SeqIO
+
+from BioUtils.TagsGenerator import generate_tags
+from BioUtils.CommonTools import print_exception
+
+
+if __name__ == '__main__':
+    #parse command line arguments
+    parser = argparse.ArgumentParser(description='Generate oligonucleotide tags '
+                                     'for given sequences.')
+    parser.add_argument('sequence_files', metavar='filename',
+                        type=str, nargs='+', 
+                        help='File(s) with sequence(s).')
+    parser.add_argument('-l --tag-length', dest='tag_length', metavar='bases', 
+                        type=int, nargs=1, required=True,
+                        help='Length of tags to be generated.')
+    parser.add_argument('-d --minimum-difference', dest='minimum_difference', metavar='bases', 
+                        type=int, nargs=1, required=True,
+                        help='Tags will differ from each other at least by this number of bases.')
+    parser.add_argument('-n --number-of-tags', dest='number_of_tags', metavar='integer', 
+                        type=int, nargs=1, required=True,
+                        help='Number of tags to be generated.')
+    parser.add_argument('-o --output', metavar='filename', dest='output',
+                        type=str, nargs='?', required=False,
+                        help='Output file. If not provided, print to stdout. '
+                        'If provided, extension (.fa/.fasta/.csv) defines output format.')
+    args = parser.parse_args()
+    
+    if not args.sequence_files:
+        print '\nYou should provide at least one sequence to tag it.' 
+        sys.exit(1)
+    
+    #parse sequences
+    sequences = []
+    for filename in args.sequence_files:
+        if not os.path.isfile(filename):
+            print "\nNo such file: "+filename
+            continue
+        genbank_pattern = re.compile(".*(\.gb|\.gbk)$")
+        fasta_pattern   = re.compile(".*(\.fa|\.fasta)$")
+        if genbank_pattern.match(filename): filetype = "gb"
+        elif fasta_pattern.match(filename): filetype = "fasta"
+        else:
+            print "\nUnable to guess format of %s" % filename
+            print "The file will be ignored."
+            print "*note: it is expected that GenBank files have .gb or .gbk extension \
+    and FASTA files have .fa or .fasta extension." 
+            continue
+        try:
+            file_id = filename[:filename.rfind('.')]
+            seq_records = list(SeqIO.parse(filename, filetype))
+            for r in xrange(len(seq_records)):
+                record = seq_records[r]
+                if not record.id: record.id = file_id+('_%d' % r)
+                sequences.append(record)
+        except Exception, e:
+            print '\nError while parsing sequences:'
+            print_exception(e)
+            print '\nFile %s will be ignored.' % filename
+            continue
+    if not sequences:
+        print '\nNo sequences was found in provided files.'
+        sys.exit(1)
+
+    #generate tags
+    tagged_sequences = generate_tags(args.tag_length[0], args.minimum_difference[0], 
+                                     args.number_of_tags[0], sequences)
+    
+    #output tags
+    out_format = 'fasta'
+    if not args.output:
+        for sequences in tagged_sequences:
+            SeqIO.write(sequences, sys.stdout, out_format)
+    else:
+        csv_pattern   = re.compile(".*(\.csv)$")
+        if fasta_pattern.match(args.output): out_format = "fasta"
+        elif csv_pattern.match(args.output): out_format = "csv"
+        else:
+            print '\nUnable to guess output format. Output to %s.%s.' \
+            % (args.output, out_format)
+        if out_format == 'fasta':
+            for sequences in tagged_sequences:
+                SeqIO.write(sequences, args.output, out_format)
+        else: #csv
+            #prepare sequences for csv formatter
+            tagged_sequences_csv = [('SID', 'sequence')]
+            for sequences in tagged_sequences:
+                for sequence in sequences:
+                    tagged_sequences_csv.append((sequence.id, str(sequence.seq)))
+            try:
+                output_file = open(args.output, 'wb')
+            except IOError, e:
+                print '\nUnable to open %s for writing.' % output_file
+                print_exception(e)
+                print '\nOutput to stdout instead:'
+                csv_writer  = csv.writer(sys.stdout, delimiter='\t', quotechar='"')
+                csv_writer.writerows(tagged_sequences_csv)
+            else:
+                csv_writer  = csv.writer(output_file, delimiter='\t', quotechar='"')
+                csv_writer.writerows(tagged_sequences_csv)
+                output_file.close()
+    sys.exit(0)
+#end

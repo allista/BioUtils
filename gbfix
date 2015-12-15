@@ -1,0 +1,79 @@
+#!/usr/bin/python
+# coding=utf-8
+#
+# Copyright (C) 2012 Allis Tauri <allista@gmail.com>
+# 
+# indicator_gddccontrol is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# indicator_gddccontrol is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.genome[:genome.rfind('.')]
+# See the GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along
+# with this program.  If not, see <http://www.gnu.org/licenses/>.
+'''
+Created on May 17, 2015
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import os
+import sys
+import re
+import argparse
+#import signal
+#import subprocess
+#import multiprocessing as mp
+#from StringIO import StringIO
+#from tempfile import mkstemp, gettempdir
+#from threading import Thread, Event
+#from time import sleep
+#
+#from Bio import SeqIO
+#from Bio.SeqIO.InsdcIO import EmblScanner
+#from Bio.GenBank import _FeatureConsumer #this is private and may be changed by BioPython
+#from Bio.GenBank.utils import FeatureValueCleaner
+#from Bio.Alphabet import DNAAlphabet
+
+gbline = 80
+gbindent = ' '*12
+def indent(s):
+    if len(s) > 12:
+        print 'Warning: section name is too long: %s' % s
+        return s[:11]+' '
+    return s+' '*12-len(s)
+
+if __name__ == '__main__':
+    #parse arguments
+    parser = argparse.ArgumentParser(description='Fixes some common errors introduced buy Ugene.')
+    parser.add_argument('files', metavar='filename.gb',
+                        type=str, nargs='+',
+                        help='File(s) in genbank format.')
+    args = parser.parse_args()
+    #check arguments
+    if not args.files:
+        print 'You should provide at least one file.' 
+        sys.exit(1)
+    #cleanup quotes in qualifiers values
+    for filename in args.files:
+        if not os.path.isfile(filename):
+            print "No such file:", filename
+            continue
+        os.rename(filename, filename+'.old')
+        with open(filename+'.old', 'r') as f:
+            with open(filename, 'w') as out:
+                print 'Processing %s' % filename
+                for line in f:
+#                    if line.startswith('LOCUS'):
+#                        words = line.split()
+#                        if not 'DNA' in words \
+#                        or not 'RNA' in words:
+#                        bpi = words.index('bp')
+#                        
+                    fline = re.sub(r'(\s|[a-zA-Z])"([a-zA-Z]"?)', 
+                                   r'\1\2', line)
+                    out.write(fline)

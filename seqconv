@@ -1,0 +1,101 @@
+#!/usr/bin/python
+# coding=utf-8
+#
+# Copyright (C) 2012 Allis Tauri <allista@gmail.com>
+# 
+# indicator_gddccontrol is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# indicator_gddccontrol is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See the GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along
+# with this program.  If not, see <http://www.gnu.org/licenses/>.
+'''
+Created on Jul 9, 2012
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import os
+import sys
+import argparse
+import csv
+
+from Bio import SeqIO #, AlignIO
+#from Bio.SeqRecord import SeqRecord
+#from Bio.Seq import Seq
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Convert sequences from format to format.')
+    parser.add_argument('sequence_files', metavar='filename',
+                        type=str, nargs='+',
+                        help='File with sequence(s).')
+    parser.add_argument('-f', '--from-format', dest='from_format', metavar='FLAG', 
+                        type=str, default='gb',
+                        help='Convert from format (gb, fasta, etc.')
+    parser.add_argument('-t', '--to-format', dest='to_format', metavar='FLAG', 
+                        type=str, default='fasta',
+                        help='Convert to format (gb, fasta, etc.')
+    parser.add_argument('-d', '--data-type', dest='datatype', metavar='dna', 
+                        type=str, default='dna',
+                        help='Data type of the sequence (dna, rna, protein...)')
+    parser.add_argument('-r', '--recode-sequences', dest='recode', 
+                        action='store_true',
+                        help='If sequence names should be recoded '
+                        '(for formats that restrict tag lengths).')
+    parser.add_argument('-n', '--sequence-names', dest='names', 
+                        type=str, metavar='file.csv',
+                        help='A csv file with a table of sequence names to use '
+                        'with -r option. If ommited, names like "s1", "s2"... are used.')
+    args = parser.parse_args()
+    #check arguments
+    if not args.sequence_files:
+        print 'You should provide at least one file for conversion.' 
+        sys.exit(1)
+    #parse sequence name if provided
+    seq_names = {}
+    if args.names and os.path.isfile(args.names):
+        with open(args.names) as inp:
+            csvr = csv.reader(inp)
+            for row in csvr:
+                if len(row) != 2: continue
+                seq_names[row[0]] = row[1]
+                seq_names[row[1]] = row[0]
+    #convert sequences
+    for sequence_file in args.sequence_files:
+        if not os.path.isfile(sequence_file):
+            print "No such file:", sequence_file
+            continue
+        filebase = sequence_file[:sequence_file.rfind('.')]
+        out_filename = filebase+'.'+args.to_format
+        try:
+            records = SeqIO.parse(sequence_file, args.from_format)
+            if args.recode:
+                print 'Converting sequence names.'
+                records = list(records)
+                if seq_names:
+                    print 'Using provided names table: %s' % args.names
+                    for r in records:
+                        nid = seq_names.get(r.id)
+                        if nid: r.id = nid
+                else:
+                    csv_file = filebase+'_names.csv' 
+                    with open(csv_file, 'wb') as out:
+                        writer = csv.writer(out) 
+                        for i, r in enumerate(records):
+                            nid = 's%d' % (i+1)
+                            writer.writerow((nid, r.id))
+                            r.id = nid
+                    print 'Names of sequences are stored in: %s' % csv_file
+            SeqIO.write(records, out_filename, args.to_format)
+        except Exception, ex:
+            print 'Failed to convert:'
+            print ex
+            continue
+        print 'Converted %s to %s' % (sequence_file, out_filename)
+#end main

@@ -1,0 +1,108 @@
+#!/usr/bin/python
+# coding=utf-8
+#
+# Copyright (C) 2012 Allis Tauri <allista@gmail.com>
+# 
+# indicator_gddccontrol is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# indicator_gddccontrol is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See the GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along
+# with this program.  If not, see <http://www.gnu.org/licenses/>.
+'''
+Created on Feb 24, 2015
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import os
+import sys
+import argparse
+import signal
+
+from Bio import SeqIO
+
+FMT = 'fasta'
+EXT = 'fasta'
+
+abort = False
+cur_file = None
+def sig_handler(signal, frame):
+    global abort
+    if cur_file is not None:
+        cur_file.close()
+    abort = True
+    print 'Aborted.'
+#end def
+
+def strip_ext(name):
+    return name[:name.rfind('.')]
+    
+def out_file(name, num):
+    filename  = os.path.basename(strip_ext(name))
+    filename += '-%03d.%s' % (num, EXT)
+    return open(filename, 'wb')
+#end def
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Split huge %s files with many records into a set of smaller files.' % FMT)
+    parser.add_argument('sequence_files', metavar='file.%s' % FMT,
+                        type=str, nargs='+',
+                        help='File(s) with sequences.')
+    parser.add_argument('-s', '--sequences-per-file', dest='max_seqs', metavar='number', 
+                        type=int, default=10000,
+                        help='Maximum number of sequences per output file')
+    parser.add_argument('-e', '--output-extension', dest='ext', metavar='.ext', 
+                        type=str, default='fasta',
+                        help='Extension of output files')
+    args = parser.parse_args()
+    
+    if not args.sequence_files:
+        print 'You should provide at least one file for conversion.' 
+        sys.exit(1)
+    EXT = args.ext
+        
+    #setup signal handler
+    signal.signal(signal.SIGINT,  sig_handler)
+    signal.signal(signal.SIGTERM, sig_handler)
+    signal.signal(signal.SIGQUIT, sig_handler)
+    
+    topd = os.curdir;    
+    for sequence_file in args.sequence_files:
+        os.chdir(topd)
+        #check file existence
+        if not os.path.isfile(sequence_file):
+            print "No such file:", sequence_file
+            continue
+        print 'Splitting %s into slices of %d sequences max' % (sequence_file, args.max_seqs)
+        #make working directory
+        wd = strip_ext(sequence_file)
+        if not os.path.isdir(wd): os.mkdir(wd)
+        os.chdir(wd)
+        print 'Working directory: %s' % wd
+        #initialize slicing
+        seqs = 0
+        files = 1
+        cur_file = None
+        for seq in SeqIO.parse(sequence_file, FMT):
+            if cur_file is None or seqs >= args.max_seqs:
+                if cur_file is not None:
+                    print 'Wrote %d sequences to %s' % (seqs, cur_file.name)
+                    cur_file.close()
+                cur_file = out_file(sequence_file, files)
+                files += 1
+                seqs = 0
+            if abort or cur_file.closed: sys.exit()
+            SeqIO.write(seq, cur_file, FMT)
+            seqs += 1
+        if cur_file is not None: 
+            print 'Wrote %d sequences to %s' % (seqs, cur_file.name)
+            cur_file.close()
+        print '-'*30 + 'Done' + '-'*30
+#end main

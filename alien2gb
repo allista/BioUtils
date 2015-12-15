@@ -1,0 +1,324 @@
+#!/usr/bin/python
+# coding=utf-8
+#
+# Copyright (C) 2012 Allis Tauri <allista@gmail.com>
+# 
+# indicator_gddccontrol is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# indicator_gddccontrol is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.genome[:genome.rfind('.')]
+# See the GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along
+# with this program.  If not, see <http://www.gnu.org/licenses/>.
+'''
+Created on May 10, 2015
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import os
+import sys
+import re
+import argparse
+import signal
+import subprocess
+import multiprocessing as mp
+from StringIO import StringIO
+from tempfile import mkstemp, gettempdir
+from threading import Thread, Event
+from time import sleep
+
+from Bio import SeqIO
+from Bio.SeqIO.InsdcIO import EmblScanner
+from Bio.GenBank import _FeatureConsumer #this is private and may be changed by BioPython
+from Bio.GenBank.utils import FeatureValueCleaner
+from Bio.Alphabet import DNAAlphabet
+#from Bio.SeqFeature import SeqFeature
+#from Bio.SeqRecord import SeqRecord
+#from Bio.Seq import Seq
+
+cpu_count = mp.cpu_count()
+
+formats = {'embl'  : re.compile(r'.*(\.em|\.embl)$'),
+           'gb'    : re.compile(r'.*(\.gb|\.gbk|\.genbank)$'),
+           'fasta' : re.compile(r'.*(\.fa|\.fas|\.fasta|\.fna|\.ffn|\.frn)$'),  
+           }
+
+_pid = -1
+abort_event = None
+def sig_handler(signal, frame):
+    if _pid != os.getpid(): return
+    print('\nAborting. This may take some time '
+          'as not all operations could be stopped immediately.\n')
+    abort_event.set(); sleep(0.1)
+#end def
+    
+def guess_fmt(filename):
+    for fmt, rgx in formats.iteritems():
+        if rgx.match(filename): return fmt
+    return None
+#end def
+
+def strip_ext(filename):
+    return filename[:filename.rfind('.')]
+
+def load_sequence(filename):
+    if not os.path.isfile(filename): return []
+    fmt = guess_fmt(filename)
+    if not fmt:
+        print 'Unable to guess format of %s' % filename
+        return []
+    try:
+        records = list(SeqIO.parse(filename, fmt))
+    except Exception, e:
+        print e.message
+        print 'load_sequence: unable to parse %s' % filename
+        return []
+    return records
+#end def
+
+def read_hgt(filename):
+    with open(filename, 'r') as hgt_file:
+        #read hgt annotations into a stringIO and add feature table header
+        hgt = StringIO()
+        hgt.write(EmblScanner.FEATURE_START_MARKERS[0]+'\n')
+        hgt.writelines(hgt_file)
+        hgt.write(EmblScanner.FEATURE_END_MARKERS[0])
+        hgt.seek(0)
+        #parse features using private BioPython code
+        parser = EmblScanner()
+        parser.set_handle(hgt)
+        parser.line = hgt.readline()
+        consumer = _FeatureConsumer(use_fuzziness=1,
+                                    feature_cleaner=FeatureValueCleaner())
+        parser._feed_feature_table(consumer, parser.parse_features())
+        consumer.size(0)
+        consumer.sequence('')
+        consumer.record_end("//")
+        return consumer.data
+#end def
+
+def prepare_genome(genome):
+    genome.name = genome.name[:16]
+    genome.seq.alphabet = DNAAlphabet()
+#end def
+
+
+class AHunter(Thread):
+    _hunter = 'alien_hunter'
+
+    def __init__(self, genome, opt, tmpdir=None):
+        Thread.__init__(self, name=genome)
+        self._subprocess = None
+        self._genome = genome
+        self._opt = opt
+        self._aborted = False
+        #get tmp directory
+        if tmpdir is None:
+            self._tmpdir = gettempdir()
+        else: self._tmpdir = tmpdir
+        #create tmp filenames
+        self._output = self._mktmp_filename('alien_hunter_', '.hgt')
+        self._fasta = self._mktmp_filename('alien_hunter_', '.fasta')
+    #end def
+    
+    def __del__(self): self.clean()
+    
+    def _mktmp_filename(self, prefix, ext):
+        fd, filename = mkstemp(ext, prefix, dir=self._tmpdir)
+        os.close(fd); os.unlink(filename)
+        return filename
+    #end def
+    
+    @property
+    def genome(self): return self._genome
+    
+    @property
+    def output(self):
+        if self._opt: return self._output+'.opt'
+        return self._output
+    
+    @property
+    def valid(self): 
+        return (self._subprocess and 
+                self._subprocess.returncode == 0 and
+                os.path.isfile(self.output))
+    
+    @classmethod
+    def is_installed(cls):
+        try: ret = subprocess.call([cls._hunter], 
+                                   stdin =subprocess.PIPE,
+                                   stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE,
+                                   shell=False)
+        except: return False
+        return ret == 0
+    #end def
+    
+    def _run_alien_hunter(self):
+        #convert genome to fasta
+        genome = load_sequence(self._genome)
+        if not genome:
+            print 'Unable to parse %s' % self._genome
+            return False
+        SeqIO.write(genome, self._fasta, 'fasta')
+        #run alien hunter
+        cmd = [self._hunter, self._fasta, self._output]
+        if self._opt: cmd.append('-c')
+        print 'Processing %s' % self._genome
+        print 'Running: %s' % ' '.join(cmd)
+        try: self._subprocess = subprocess.Popen(cmd,
+                                                 stdin =subprocess.PIPE,
+                                                 stdout=subprocess.PIPE,
+                                                 stderr=subprocess.PIPE,
+                                                 shell=False)
+        except Exception, e:
+                print 'Failed to execute alien_hunter:', e.message
+                return False
+        print ''
+        return self._subprocess is not None
+    #end def
+    
+    def run(self):
+        self._aborted = False
+        if not self._run_alien_hunter(): return
+        if self._subprocess.wait() != 0 or not self.valid:
+            if self._aborted: return
+            print 'Failed to process %s' % self._genome
+            print 'Return code: %s' % self._subprocess.returncode
+            stdout, stderr = self._subprocess.communicate()
+            if stdout or stderr:
+                print 'Output:'
+                if stdout: print stdout
+                if stderr: print stderr
+            print
+        else: 
+            print 'HGT scanning is finished for %s\n' % self._genome
+    #end def
+    
+    def abort(self):
+        self._aborted = True
+        if (self._subprocess and 
+            self._subprocess.poll() is None):
+            try: self._subprocess.terminate()
+            except: pass 
+            self._subprocess.wait()
+    #end def
+    
+    def clean(self):
+        #clean tmp genome
+        try: os.unlink(self._fasta)
+        except: pass
+        #clean output
+        tmp_dir = os.path.dirname(self._output)
+        fname   = os.path.basename(self._output)
+        for entry in os.listdir(tmp_dir):
+            if entry.startswith(fname):
+                try: os.unlink(entry)
+                except: pass
+#end class
+
+
+class JobManager(object):
+    def __init__(self, abort_event):
+        self._abort_event = abort_event
+        self._jobs = []
+        self._done = []
+        self._running = []
+    #end def
+
+    @property
+    def results(self): return self._done
+        
+    def add_job(self, job):
+        self._jobs.append(job)
+        
+    def run(self):
+        if self._running: return
+        while (not self._abort_event.is_set() and 
+               (self._jobs or self._running)):
+            if self._jobs and len(self._running) < cpu_count:
+                job = self._jobs.pop()
+                job.start()
+                self._running.append(job)
+            else:
+                job_done = None
+                while not self._abort_event.is_set() and not job_done:
+                    for job in self._running:
+                        if job.is_alive(): continue
+                        self._done.append(job)
+                        job_done = job
+                    if job_done: self._running.remove(job_done)
+                    sleep(0.1)
+        if self._abort_event.is_set(): self.abort()
+    #end def
+    
+    def abort(self):
+        for job in self._running:
+            job.abort()
+            job.join()
+#end class
+
+if __name__ == '__main__':
+    #check for alien_hunter
+    if not AHunter.is_installed():
+        print 'alien_hunter is not found in the PATH'
+        sys.exit(1)
+    #parse arguments
+    parser = argparse.ArgumentParser(description='Runs alien_hunter and merges '
+                                     'its output with the original sequence into a genbank file.')
+    parser.add_argument('genomes', metavar='filename',
+                        type=str, nargs='+',
+                        help='File(s) with genome sequences.')
+    parser.add_argument('-o',  '--optimize-predictions', dest='optimize', 
+                        action='store_true',
+                        help='Optimize predicted boundaries with a change-point detection 2 state 2nd order HMM')
+    args = parser.parse_args()
+    #check arguments
+    if not args.genomes:
+        print 'You should provide at least one genome sequence.' 
+        sys.exit(1)
+    #setup signal handling
+    _pid = os.getpid()
+    abort_event = Event()
+    signal.signal(signal.SIGINT,  sig_handler)
+    signal.signal(signal.SIGTERM, sig_handler)
+    signal.signal(signal.SIGQUIT, sig_handler)
+    #prepare hunters
+    hunters = JobManager(abort_event)
+    for genome in args.genomes:
+        if not os.path.isfile(genome):
+            print "No such file:", genome
+            continue
+        hunters.add_job(AHunter(genome, args.optimize))
+    #run hunters
+    hunters.run()
+    if abort_event.is_set():
+        print 'Aborted.'
+        sys.exit(0)
+    #parse hgt annotations and add them to genomes
+    for hunter in hunters.results:
+        if not hunter.valid: continue
+        hgt = read_hgt(hunter.output)
+        if not hgt.features:
+            print 'No HGT candidates found in %s' % hunter.genome
+            continue
+        genome = load_sequence(hunter.genome)
+        if not genome: continue
+        elif len(genome) == 1: #handle a single genome
+            genome = genome[0]
+            prepare_genome(genome)
+            genome.features.extend(hgt.features)
+            out_filename = strip_ext(hunter.genome)+'.with_hgt.gb'
+            SeqIO.write(genome, out_filename, 'gb')
+            print 'Output written to: %s' % out_filename
+        else: #handle multiple contigs
+            raise NotImplementedError('Genomes in multiple contigs are not yet supported')
+            for contig in genome: pass
+        hunter.clean()
+#end main

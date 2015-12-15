@@ -1,0 +1,11 @@
+eclipse.preferences.version=1
+encoding/alien2gb=utf-8
+encoding/analyze_family=utf-8
+encoding/draw_clusters.py=utf-8
+encoding/gaps_encoder=utf-8
+encoding/gbfix=utf-8
+encoding/parse_chrom=utf-8
+encoding/rename_genomes=utf-8
+encoding/seqconv=utf-8
+encoding/setup.py=utf-8
+encoding/split_fasta=utf-8

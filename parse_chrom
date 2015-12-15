@@ -1,0 +1,85 @@
+#!/usr/bin/python
+# coding=utf-8
+#
+# Copyright (C) 2012 Allis Tauri <allista@gmail.com>
+# 
+# indicator_gddccontrol is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# indicator_gddccontrol is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See the GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along
+# with this program.  If not, see <http://www.gnu.org/licenses/>.
+'''
+Created on May 16, 2015
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import os
+import sys
+import argparse
+import csv
+import re
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Parses Phoenix chromatogram report files.')
+    parser.add_argument('reports', metavar='filename.txt',
+                        type=str, nargs='+',
+                        help='File(s) with chromatogram reports.')
+    parser.add_argument('-o', '--output', metavar='filename.csv',
+                        type=str, nargs=1, default='-',
+                        help='Name of the output csv file. Output to stdout if not provided.')
+    args = parser.parse_args()
+    
+    if not args.reports:
+        print 'You should provide at least one report file.' 
+        sys.exit(1)
+    
+    rows = [['sample']]
+    for report_file in args.reports:
+        if not os.path.isfile(report_file):
+            print "No such file:", report_file
+            continue
+        rows.append([report_file[:report_file.rfind('.')]])
+        row = rows[-1]
+        nconv = re.compile(r'(\d+),(\d+)')
+        with open(report_file, 'r') as report:
+            for line in report:
+                #replace comma with dot in numbers
+                uline = nconv.sub(r'\1.\2', line.decode('cp1251'))
+                #split into columns
+                cols = [w.strip() for w in uline.split(',')]
+                if len(cols) < 3: continue
+                #split the first column into words
+                words = [unicode(w.strip().strip(':')) for w in cols[0].split()]
+                if not words: continue
+                #search for the right first word
+                if words[0] != u'Компонент': continue
+                if len(words) < 3: 
+                    print 'Invalid format of the component string'
+                    continue
+                #parse component concentration
+                comp = words[2]
+                try: ncomp = rows[0].index(comp)
+                except ValueError: 
+                    ncomp = len(rows[0]) 
+                    rows[0].append(comp)
+                if ncomp >= len(rows[-1]):
+                    row.extend([0.0]*(ncomp-len(row)+1))
+                rows[-1][ncomp] = float(cols[2].split()[1])
+        if len(row) < len(rows[0]):
+            row.extend([0.0]*(len(rows[0])-len(row)))
+    #write results
+    if args.output == '-': outf = sys.stdout
+    else: outf = open(args.output, 'wb')
+    output = csv.writer(outf)
+    for r in rows: output.writerow(r)
+    if outf is not sys.stdout: outf.close()
+#end main

@@ -1,0 +1,354 @@
+#!/usr/bin/python
+# coding=utf-8
+#
+# Copyright (C) 2012 Allis Tauri <allista@gmail.com>
+# 
+# degen_primer is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# degen_primer is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See the GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along
+# with this program.  If not, see <http://www.gnu.org/licenses/>.
+'''
+Created on Apr 19, 2013
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import sys, os, re
+import dendropy as dp
+from dendropy.datamodel.charstatemodel import BinaryStateAlphabet
+from dendropy.datamodel.charmatrixmodel import CharacterSubset
+import argparse
+from contextlib import contextmanager
+
+isatty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+
+@contextmanager
+def user_message(msg):
+    print msg+' ',
+    sys.stdout.flush()
+    try: yield
+    finally:
+        sys.stdout.write('Done\n')
+        sys.stdout.flush()
+
+class GapEncoder(object):
+    '''Encode gaps information from an alignment into a binary data-matrix 
+    of STANDARD type and write results into a NEXUS file containing original 
+    and encoded matrices.'''
+    
+    schemas = ('fasta', 'nexus', 'phylip')
+    datatypes = { 'dna' : dp.DnaCharacterMatrix, 
+                  'rna' : dp.RnaCharacterMatrix, 
+                  'nucleotide' : dp.NucleotideCharacterMatrix, 
+                  'protein' : dp.ProteinCharacterMatrix }
+    
+    progress_len  = '      '
+    progress_back = '\b'*len(progress_len)
+    
+    @classmethod
+    def _print_progress(cls, progress, total):
+        sys.stdout.write('%s[%3.0f%%]' % 
+                         (cls.progress_back if isatty else ' ',
+                          (float(progress)+1)/total*100.0))
+        sys.stdout.flush()
+        
+    @classmethod
+    def _preprogress(cls, msg):
+        print msg, cls.progress_len if isatty else '',
+        sys.stdout.flush()
+    
+    def __init__(self, filename, datatype, schema=None, variable_only=False, for_mrbayes=False):
+        self._in_filename   = filename
+        self._out_filename  = filename[:filename.rfind('.')]+'-with-gaps.nex'
+        self._variable_only = variable_only or for_mrbayes #mrbayes needs variable only sites
+        self._for_mrbayes   = for_mrbayes
+        self._num_taxa      = 0
+        self._alignment_len = 0
+        self._gaps_len      = 0
+        self._set_datatype(datatype)
+        
+        #guess schema
+        if not schema:
+            schema = ''
+            fas_re = re.compile(".*\.f(asta|as|a|aa|fn|rn|na)$")
+            nex_re = re.compile(".*\.n(exus|ex|xs)$")
+            phy_re = re.compile(".*\.ph(y)$")
+            if   fas_re.match(self._in_filename): schema = 'fasta'
+            elif nex_re.match(self._in_filename): schema = 'nexus'
+            elif phy_re.match(self._in_filename): schema = 'phylip'
+            else: raise ValueError('GapEncoder: Couldn\'t guess schema by file '
+                                   'extension and no schema is provided.')
+        self._schema = schema
+        
+        #parse data
+        self._orig_matrix = None
+        self._gaps_matrix = None
+    #end def
+    
+    _dtype  = re.compile(r'datatype=(\w+)')
+    _matrix = re.compile(r'^\s*matrix$')
+    _empty  = re.compile(r'^\s*$')
+    _illegal = re.compile(r'[ \-=/\(\)#],')
+    
+    def _preprocess_nexus(self, filename):
+        datatype = ""
+        output = ""
+        item = ""
+        has_header = False
+        with user_message('Preprocessing nexus file...'):
+            with open(filename) as f:
+                for line in f:
+                    line = line.strip('\r\n')
+                    if has_header:
+                        if self._empty.match(line):
+                            output += item+'\n\n'
+                            item = ""
+                        else: item += line if item else line+' '
+                    else:
+                        m = self._dtype.search(line)
+                        if m: datatype = m.group(1)
+                        output += line+'\n'
+                        if self._matrix.match(line): has_header = True
+        return datatype, output
+    
+    def _set_datatype(self, dtype):
+        dtype = dtype.lower()
+        if not dtype in self.datatypes:
+            raise ValueError('Unknown datatype %s' % dtype)
+        self._datatype = dtype
+    
+    def _load_matrix(self, matrix = None):
+        mclass = self.datatypes[self._datatype]
+        try:
+            if matrix:
+                self._orig_matrix = mclass.get_from_string(matrix, self._schema, 
+                                                           preserve_underscores=True, 
+                                                           ignore_unrecognized_keyword_arguments=True)
+            else:
+                self._orig_matrix = mclass.get_from_path(self._in_filename, self._schema, 
+                                                         preserve_underscores=True, 
+                                                         ignore_unrecognized_keyword_arguments=True)
+            for t in self._orig_matrix.taxon_namespace:
+                l = self._illegal.sub('_', t.label.strip('\'"')).strip('_')
+                l = re.sub('__+', '_', l)
+                t.label = l
+            self._num_taxa = len(self._orig_matrix)
+            self._alignment_len = len(self._orig_matrix[0])
+        except Exception, e:
+            raise RuntimeError('GapEncoder: unable to parse input file:\n%s' % e.message)
+            
+    
+    def _load_data(self):
+        print 'Loading data...'
+        if self._schema == 'nexus':
+            datatype, matrix = self._preprocess_nexus(self._in_filename)
+            self._set_datatype(datatype)
+            self._load_matrix(matrix)
+        else: self._load_matrix()
+        print 'Data loaded'
+        
+    def parse_data(self):
+        self._load_data()
+        #recode data elements into binary gap data
+        self._preprogress('Encoding gaps...')
+        self._gaps_matrix = dp.StandardCharacterMatrix(default_state_alphabet=BinaryStateAlphabet(allow_missing=True))
+        bin_alphabet = self._gaps_matrix.default_state_alphabet 
+        self._gaps_matrix.taxon_namespace = self._orig_matrix.taxon_namespace
+        for i, (taxon, seq) in enumerate(self._orig_matrix.items()):
+            self._print_progress(i, self._num_taxa)
+            self._gaps_matrix[taxon] = dp.CharacterDataSequence()
+            for char in seq:
+                if char.symbol is self._orig_matrix.default_state_alphabet.no_data_symbol:
+                    self._gaps_matrix[taxon].append(bin_alphabet.no_data_state) 
+                elif char.is_gap_state:
+                    self._gaps_matrix[taxon].append(bin_alphabet['0'])
+                else: self._gaps_matrix[taxon].append(bin_alphabet['1'])
+        #if only variable columns are needed, pick them
+        if self._variable_only:
+            var_indices = []
+            self._preprogress('\nSelecting variable sites...')
+            taxons = list(self._gaps_matrix.values())
+            first_t = taxons[0]
+            taxons = taxons[1:]
+            for c in xrange(self._alignment_len):
+                self._print_progress(c, self._alignment_len)
+                char = first_t[c]
+                for taxon in taxons:
+                    if char != taxon[c]:
+                        var_indices.append(c)
+                        break
+            if var_indices:
+                self._preprogress('\nRemoving non-variable sites...')
+                for i, sec in enumerate(self._gaps_matrix.values()):
+                    self._print_progress(i, self._num_taxa)
+                    for idx in range(len(sec)-1, -1, -1):
+                        if idx not in var_indices:
+                            del(sec[idx])
+                self._gaps_len = len(self._gaps_matrix.values().next()) if self._gaps_matrix else 0
+                num_subsets = len(self._orig_matrix.character_subsets)
+                if num_subsets: 
+                    self._preprogress('\nReindexing subsets of sites...')
+                    for i, s_label in enumerate(self._orig_matrix.character_subsets):
+                        self._print_progress(i, num_subsets)
+                        orig_subset = self._orig_matrix.character_subsets[s_label]
+                        new_subset_indices = [var_indices.index(i) for i in orig_subset.character_indices 
+                                              if i in var_indices] 
+                        self._gaps_matrix.add_character_subset(CharacterSubset(label='gaps'+s_label, 
+                                                                               character_indices=new_subset_indices))
+            else: self._gaps_matrix = None
+        print
+    #end def
+    
+    def save(self):
+        with user_message('Saving to nexus file...'):
+            if not self._for_mrbayes:
+                #prepare and fill DataSet with two matrices
+                nx_set = dp.DataSet()
+                nx_set.attach_taxon_namespace(self._orig_matrix.taxon_namespace)
+                nx_set.add_char_matrix(self._orig_matrix)
+                if self._gaps_matrix is not None: 
+                    nx_set.add_char_matrix(self._gaps_matrix)
+                #write out the results
+                nx_set.write(path=self._out_filename, schema='nexus', unquoted_underscores=True, preserve_spaces=True)
+            elif self._gaps_matrix is not None:
+                #make combined alphabet
+                comb_alphabet = type(self._orig_matrix.default_state_alphabet)()
+                for s in self._gaps_matrix.default_state_alphabet.fundamental_state_iter():
+                    try: comb_alphabet.new_fundamental_state(s.symbol)
+                    except: pass
+                #combine matrices
+                self._gaps_matrix.extend_matrix(self._orig_matrix)
+                self._gaps_matrix.default_state_alphabet = comb_alphabet
+                self._gaps_matrix.remap_to_default_state_alphabet_by_symbol()
+                #add charsets to the combined matrices if needed
+                if not self._gaps_matrix.character_subsets:
+                    self._gaps_matrix.add_character_subset(CharacterSubset(label='gaps',
+                                                                           character_indices=xrange(self._gaps_len)))
+                if self._orig_matrix.character_subsets:
+                    for s_label in self._orig_matrix.character_subsets:
+                        self._gaps_matrix.add_character_subset(CharacterSubset(label='sequences'+s_label,
+                                                                               character_indices=(self._gaps_len+i 
+                                                                                                  for i in self._orig_matrix.character_subsets[s_label])))
+                else:
+                    self._gaps_matrix.add_character_subset(CharacterSubset(label='sequences',
+                                                                           character_indices=(self._gaps_len+i for i in xrange(self._alignment_len))))
+                #write output
+                self._gaps_matrix.write(path=self._out_filename, schema='nexus', unquoted_underscores=True, preserve_spaces=True)
+            else: self._orig_matrix.write(path=self._out_filename, schema='nexus', unquoted_underscores=True, preserve_spaces=True)
+        self._postprocess_nexus_file()
+        print 'Output was written to %s' % self._out_filename
+    #end def
+    
+    
+    def _postprocess_nexus_file(self):
+        print 'Postprocessing nexus file'
+        with user_message('Reading data...'):
+            with open(self._out_filename, 'r') as out_file:
+                nexus_lines = out_file.readlines()
+                num_lines = len(nexus_lines)
+        with open(self._out_filename, 'w') as out_file:
+            #add comment for mrbayes
+            begin_sets = False
+            charsets   = []
+            self._preprogress('Processing data...')
+            for i, line in enumerate(nexus_lines):
+                self._print_progress(i, num_lines)
+                words = line.split()
+                if not words: continue
+                if  self._for_mrbayes and self._gaps_matrix \
+                and words[0].upper() == 'FORMAT':
+                    new_line  = '    FORMAT '
+                    new_line += ('DATATYPE=mixed(Restriction:1-%d,%s:%d-%d) '
+                                 % (self._gaps_len, self._datatype,
+                                    self._gaps_len+1,
+                                    self._gaps_len+self._alignment_len))
+                    new_line += ('MISSING=%s ' 
+                                 % str(self._orig_matrix.default_state_alphabet.no_data_symbol))
+                    new_line += ('GAP=%s;\n' 
+                                 % str(self._orig_matrix.default_state_alphabet.gap_symbol))
+                    nexus_lines[i] = new_line
+                elif words[0].upper() == 'BEGIN' \
+                and  words[1].upper() == 'SETS;':
+                    if self._for_mrbayes: 
+                        nexus_lines[i] = 'BEGIN MRBAYES;\n'
+                    begin_sets = True
+                    charsets   = []
+                elif begin_sets:
+                    if words[0].upper() == 'CHARSET':
+                        charsets.append(words[1])
+                    elif words[0].upper() == 'END;' and charsets:
+                        new_line = ''
+                        if self._for_mrbayes:
+                            new_line += '    partition parts = %d: %s;\n' % (len(charsets), 
+                                                                            ', '.join(charsets))
+                            new_line += '    set partition = parts;\n\n'
+                            new_line += '    [other mrbayes commands]\n\n'
+                        else:
+                            new_line  = '    charpartition parts = %s;\n' % (', '.join([s+':'+s for s in charsets]))
+                        new_line += 'END;\n'
+                        nexus_lines[i] = new_line
+                        begin_sets = False
+            out_file.writelines(nexus_lines)
+        print
+    #end def
+#end class        
+
+import traceback
+
+if __name__ == '__main__':
+    #parse command line
+    parser = argparse.ArgumentParser(description='Encode gaps information from '
+                                     'DNA alignment into a binary data-matrix '
+                                     'of STANDARD type and write results into '
+                                     'a NEXUS file containing original and encoded '
+                                     'matrices.')
+    parser.add_argument('alignment_file', metavar='path',
+                        type=str, nargs=1,
+                        help='File containing an alignment.')
+    parser.add_argument('--datatype', metavar='str', default=[GapEncoder.datatypes.keys()[0]],
+                        type=str, nargs=1, choices=GapEncoder.datatypes.keys(),
+                        help='Matrix datatype. May be %s.' % ', '.join(GapEncoder.datatypes.keys()))
+    parser.add_argument('--schema', metavar='str',
+                        type=str, nargs=1, choices=GapEncoder.schemas, default=[None],
+                        help='Alignment file schema. May be %s.' % ', '.join(GapEncoder.schemas))
+    parser.add_argument('--variable-only', default=False, action='store_true',
+                        help='With this option output gaps matrix will contain '
+                        'only the columns with variable states (i.e. with both '
+                        'gaps and nucleotides).')
+    parser.add_argument('--for-mrbayes', default=False, action='store_true',
+                        help='With this option gaps matrix will be concatenated '
+                        'with the original alignment, so the output file may be '
+                        'used as input for MrBayes. Appropriate charsets will be '
+                        'written as well, but you still need to add mrbayes block '
+                        'to the file by hand.')
+    args = parser.parse_args()
+    
+    #filename to parse
+    alignment_file = args.alignment_file[0]
+    
+    #check that alignment file exists
+    if not alignment_file or not os.path.isfile(alignment_file):
+        print 'File "%s" not found.' % alignment_file 
+        sys.exit(1)
+    
+    #parse alignment
+    try:
+        gap_enc = GapEncoder(alignment_file, args.datatype[0], args.schema[0], args.variable_only, args.for_mrbayes)
+        gap_enc.parse_data()
+        gap_enc.save()
+    except Exception, e:
+        print '\n'+e.message
+        print '-'*80
+        traceback.print_last(sys.stdout)
+        sys.exit(1)
+    
+    sys.exit(0)
+#end

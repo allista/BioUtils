@@ -1,0 +1,70 @@
+#!/usr/bin/python
+# coding=utf-8
+#
+# Copyright (C) 2012 Allis Tauri <allista@gmail.com>
+# 
+# indicator_gddccontrol is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# indicator_gddccontrol is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.genome[:genome.rfind('.')]
+# See the GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along
+# with this program.  If not, see <http://www.gnu.org/licenses/>.
+'''
+Created on May 28, 2015
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import os
+import sys
+import argparse
+from Bio import SeqIO
+
+def rename_file(old, new):
+    if not os.path.isfile(new):
+        fname = lambda: '%s.gb' % new
+    else:
+        ind  = 1
+        fname = lambda: '%s_%03d.gb' % (new, ind)
+        while os.path.isfile(fname()): ind += 1
+    if old == fname(): return
+    os.rename(old, fname())
+    print '%s -> %s' % (old, fname())
+#end def
+
+def get_organism(filename):
+    try: rec = SeqIO.parse(filename, 'gb').next()
+    except Exception: return None
+    organism = 'Unknown'
+    for f in rec.features:
+        if f.type != 'source': continue
+        try: organism = f.qualifiers['organism'][0].replace(' ', '_')
+        except KeyError: pass
+    return organism
+#end def
+
+if __name__ == '__main__':
+    #parse arguments
+    parser = argparse.ArgumentParser(description='Remanes genbank files according to source organism.')
+    parser.add_argument('files', metavar='filename.gb',
+                        type=str, nargs='+',
+                        help='File(s) in genbank format.')
+    args = parser.parse_args()
+    #check arguments
+    if not args.files:
+        print 'You should provide at least one file.' 
+        sys.exit(1)
+    #rename files
+    for filename in args.files:
+        if not os.path.isfile(filename):
+            print "No such file:", filename
+            continue
+        org = get_organism(filename)
+        if org is None: continue
+        rename_file(filename, os.path.join(os.path.dirname(filename), org))
