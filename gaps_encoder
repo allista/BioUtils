@@ -96,7 +96,7 @@ class GapEncoder(object):
     _dtype  = re.compile(r'datatype=(\w+)')
     _matrix = re.compile(r'^\s*matrix$')
     _empty  = re.compile(r'^\s*$')
-    _illegal = re.compile(r'[ \-=/\(\)#],')
+    _illegal = re.compile(r'[ \-=/\(\)#,]')
     
     def _preprocess_nexus(self, filename):
         datatype = ""
