@@ -21,7 +21,7 @@ Created on Dec 7, 2015
 @author: Allis Tauri <allista@gmail.com>
 '''
 
-import sys, os, time, argparse
+import sys, os, time, argparse, re
 from collections import OrderedDict
 
 from Bio.KEGG import REST
@@ -34,7 +34,7 @@ from Bio.Align.Applications import MuscleCommandline, MafftCommandline
 from Bio.Phylo.Applications import FastTreeCommandline
 from reportlab.lib import colors
 import dendropy as dp
-from xml.etree import ElementTree
+from xml.dom import minidom
 
 from BioUtils.CommonTools import user_message, Progress, isatty, ncpu
 
@@ -84,7 +84,7 @@ class Lineage(tuple):
     
     def __sub__(self, other):
         return Lineage(self.str.replace(other.str, '', 1).strip(':'), delimiter=':')
-        
+    
     @property
     def last(self):
         if not self: return None
@@ -116,6 +116,14 @@ class Lineage(tuple):
             common.append(clades.pop())
             i += 1
         return cls(';'.join(common))
+    
+    @classmethod
+    def allsame(cls, lineages):
+        if not lineages: return False
+        l0 = lineages[0]
+        for l in lineages[1:]:
+            if l0 != l: return False
+        return True
 #end class
 
 class Organism(object):
@@ -350,30 +358,38 @@ class EC_Analyzer(object):
         print 'Done\n'
         return True
     
-    def _set_node_taxonomy(self, node, parent_lineage, lineage_colors=None):
+    def _set_node_taxonomy(self, node, parent_lineage, collapse, collapse_min_nodes, lineage_colors):
         '''
         Sets edge labels to clade names.
-        Optionally, to colorize for Dendroscope we add a meta annotation looking like this:
-        <meta content=" fg=255 0 0 w=2 ip= &lt; 2.447 1822.0&gt; dr=1;" datatype="xsd:string" id="meta72447" property="format" xsi:type="nex:LiteralMeta"/>
+        Optionally, "collapse" (in Dendroscope's sense) genus nodes
         '''
-        lineage = Lineage.common((l.edge.lineage 
-                                  for l in node.leaf_iter()
-                                  if l.edge.lineage))-self.lineage
+        lineages = [l.edge.lineage for l in node.leaf_iter() if l.edge.lineage]
+        bigclade = len(lineages) >= collapse_min_nodes 
+        if bigclade and Lineage.allsame(lineages):
+            lineage = lineages[0]-self.lineage
+            if collapse and lineage != parent_lineage:
+                for cn in node.preorder_internal_node_iter():
+                    cn.annotations.add_new('collapse', '', 
+                                           datatype_hint='xsd:string')
+        else: 
+            lineage = Lineage.common(lineages)
+            if lineage: lineage = lineage-self.lineage
         if lineage and lineage != parent_lineage:
             lastlin = lineage.last
-            if node.parent_node and node.is_internal():
+            if bigclade and node.parent_node and node.is_internal():
                 node.edge.label = lastlin
             if lineage_colors:
                 col = lineage_colors.get(lastlin)
                 #construct color meta for Dendroscope
-                if col: node.edge.annotations.add_new('format', 
-                                                      ' fg=%d %d %d dr=1;' % col.rgb(),
-                                                      name_prefix='', namespace='',
-                                                      datatype_hint='xsd:string')
+                if col:
+                    for cn in node.preorder_iter():
+                        cn.edge.annotations.add_new('format', 
+                                                    ' fg=%d %d %d;' % col.bitmap_rgb(),
+                                                    datatype_hint='xsd:string')
         for child in node.child_node_iter():
-            self._set_node_taxonomy(child, lineage, lineage_colors)
+            self._set_node_taxonomy(child, lineage, collapse, collapse_min_nodes, lineage_colors)
             
-    def process_tree(self, lineage_colors = None, reroot = False):
+    def process_tree(self, collapse = False, collapse_min_nodes=3, reroot = False, lineage_colors=None):
         if not os.path.isfile(self.treefile):
             print 'No tree file found.'
             return False
@@ -390,75 +406,68 @@ class EC_Analyzer(object):
                 leaf.edge.lineage = org.lineage
                 leaf.taxon.label = '%s [%s]' % (org.description, gene.id)
                 leaf.label = leaf.taxon.label
-            self._set_node_taxonomy(self.tree.seed_node, None, lineage_colors)
+            self._set_node_taxonomy(self.tree.seed_node, None, collapse, collapse_min_nodes, lineage_colors)
         if reroot:
             with user_message('Rerooting tree at midpoint...'):
                 self.tree.reroot_at_midpoint()
         with user_message('Saving resulting tree...'):
             self.tree.write(path=self.otreefile, schema='newick')
             self.tree.write(path=self.xtreefile, schema='nexml')
-        if lineage_colors:
-            with user_message('Tuning nexml file for Dendropy after colorization...'):
-                self._postprocess_nexml(self.xtreefile)
+        with user_message('Tuning nexml file for Dendroscope...'):
+            self._postprocess_nexml(self.xtreefile)
         return True
     
     @staticmethod
     def _add_meta(e, content, datatype, prop, i):
-        ElementTree.Element.tail = '\n'
-        e.insert(0, ElementTree
-                     .Element('meta', 
-                             {'content': content,
-                              'datatype': 'xsd:%s'%datatype, 'id':'imeta%d'%i, 'property': prop, 'xsi:type':'nex:LiteralMeta'}))
+        meta = minidom.Element('meta')
+        attrs = {'content': content, 'datatype': 'xsd:%s'%datatype, 'id':'imeta%d'%i, 'property': prop, 'xsi:type':'nex:LiteralMeta'}
+        for attr in attrs:  meta.setAttribute(attr, attrs[attr])
+        if e.hasChildNodes(): e.insertBefore(meta, e.childNodes[0])
+        else: e.appendChild(meta)
+                             
     
+    _nsre = re.compile(r'(\{.*\}).*')
     def _postprocess_nexml(self, nexml_file):
-        tree = ElementTree.parse(nexml_file)
-        root = tree.getroot()
-        #clean up format metas
-        for meta in root.iter('meta'):
-            p = meta.get('property')
-            if p == ':format': meta.set('property', 'format')
+        d = minidom.parse(nexml_file)
+        #get collapsed nodes' ids
+        collapsed = []
+        for n in d.getElementsByTagName('meta'):
+            lab = n.getAttribute('property')
+            if not lab: continue
+            if lab == 'dendropy:collapse' and n.parentNode:
+                collapsed.append(n.parentNode.getAttribute('id'))
+                n.parentNode.childNodes.remove(n)
+            elif lab == 'dendropy:format':
+                n.setAttribute('property', 'format') 
         #add the header
-        for i, t in enumerate(root.iter('tree')):
-            t.set('about', '#'+t.get('id'))
-            t.set('label', '[%d]'%(i+1))
-            t.set('xmlns:collapsed', '')
-            t.set('xmlns:default_edge_format', '')
-            t.set('xmlns:drawer', '')
-            t.set('xmlns:embellished', '')
-            t.set('xmlns:radiallabels', '')
-            t.set('xmlns:root', '')
-            t.set('xmlns:sparselabels', '')
-            t.set('xmlns:toscale', '')
-            t.set('xmlns:trans', '')
-            self._add_meta(t, " nh=2 nw=2 fg=0 0 0 bg=255 255 255 w=1 sh=0 fx=1 lc=0 0 0 lk=null ft='Ubuntu-ITALIC-13' lx=0 ly=0 ll=3 lv=1;", 
-                           'string', 'default_node_format', 0)
-            self._add_meta(t, " fg=0 0 0 w=1 sh=1 dr=1 lc=0 0 0 lk=null ft='Ubuntu-ITALIC-13' lx=0 ly=0 ll=11 lv=1;", 
-                           'string', 'default_edge_format', 1)
+        for i, t in enumerate(d.getElementsByTagName('tree')):
+            t.setAttribute('about', '#'+t.getAttribute('id'))
+            t.setAttribute('label', '[%d]'%(i+1))
+            t.setAttribute('xmlns:embellished', '')
+            t.setAttribute('xmlns:collapsed', '')
+            t.setAttribute('xmlns:drawer', '')
+            t.setAttribute('xmlns:toscale', '')
+            t.setAttribute('xmlns:radiallabels', '')
+            t.setAttribute('xmlns:sparselabels', '')
+            t.setAttribute('xmlns:root', '')
             self._add_meta(t, "true", 'boolean', 'embellished', 2)
-            self._add_meta(t, "RectangularPhylogram", 'string', 'drawer', 3)
-            self._add_meta(t, "true", 'boolean', 'toscale', 4)
-            self._add_meta(t, "false", 'boolean', 'sparselabels', 5)
-            self._add_meta(t, "false", 'boolean', 'radiallabels', 6)
-            self._add_meta(t, "", 'string', 'collapsed', 7)
-        #add dummy metas
+            self._add_meta(t, "RectangularPhylogram", 'string', 'drawer', 1)
+            self._add_meta(t, "true", 'boolean', 'toscale', 2)
+            self._add_meta(t, "true", 'boolean', 'sparselabels', 3)
+            self._add_meta(t, "false", 'boolean', 'radiallabels', 4)
+            self._add_meta(t, " ".join(collapsed), 'string', 'collapsed', 5)
+            self._add_meta(t, " nh=2 nw=2 fg=0 0 0 bg=255 255 255 w=1 sh=0 fx=1 lc=0 0 0 lk=null ft='Ubuntu-ITALIC-13' lx=0 ly=0 ll=3 lv=1;", 
+                           'string', 'default_node_format', 6)
+            self._add_meta(t, " fg=0 0 0 w=1 sh=1 dr=1 lc=0 0 0 lk=null ft='Ubuntu-ITALIC-13' lx=0 ly=0 ll=11 lv=1;", 
+                           'string', 'default_edge_format', 7)
+            self._add_meta(t, t.getElementsByTagName('node')[0].getAttribute('id'), 'string', 'root', 8)
         tags = ('node', 'edge')
-        for i, e in enumerate(root.iter()):
-            if not e.tag in tags: continue
-            if e.find('meta') is not None: continue
-            if e.tag == 'edge':
-                self._add_meta(e, " fg=0 0 0 dr=1;", 'string', 'format', 8+i)
-            else: self._add_meta(e, ";", 'string', 'format', 8+i)
-        tree.write(self.xtreefile, xml_declaration=True, encoding='utf-8', )
-    
-    def draw_tree(self):
-        if not self.tree:
-            print 'No tree to draw.'
-            return False
-#        import pylab
-#        with user_message('Drawing the tree...'):
-#            Phylo.draw(self.tree)
-#            pylab.show()
-#            pylab.savefig(self.xtreefile+'.png')
+        for i, n in enumerate(d.getElementsByTagName('*')):
+            if not n.tagName in tags: continue
+            n.setAttribute('about', '#'+n.getAttribute('id'))
+            self._add_meta(n, ' ;', 'string', 'format', 100+i)
+        with open(self.xtreefile, 'w') as out:
+            out.write(d.toprettyxml(encoding='utf-8'))
 #end class
         
 
@@ -489,14 +498,15 @@ if __name__ == '__main__':
                         help='Build phylogenetic tree with FastTree.')
     parser.add_argument('-r', '--reroot-at-midpoint', action='store_true',
                         help='Reroot resulting tree at midpoint.')
-    parser.add_argument('-d', '--draw-tree', action='store_true',
-                        help='Draw resulting tree.')
-    parser.add_argument('-c', '--colors', metavar='"archaea:#f3ad6;bacteria:blue"',
+    parser.add_argument('-c', '--collapse-genera', default=None, metavar='N',
+                        type=int, nargs=1,
+                        help='Collapse genera with number of nodes >= N to '
+                        'trapezium leafs in Dendroscope.')
+    parser.add_argument('--colors', metavar='"archaea:#f3ad6;bacteria:blue"',
                         type=str, nargs=1,
                         help='Colorize tree edges by phylogeny using provided colors '
                         'for Dendroscope. Both html notation and predefined color '
-                        'names are supported. NOTE: this will produce a non-valid '
-                        'NeXML file readable only by Dendroscope.')
+                        'names are supported.')
     args = parser.parse_args()
     
     #parse lineage, and start the project
@@ -512,6 +522,8 @@ if __name__ == '__main__':
     #build the tree if requested
     if args.build_tree:
         proj.fasttree_alignment()
+        #parse colors
+        lineage_colors = None 
         if args.colors:
             lineage_colors = dict()
             for col in args.colors[0].split(';'): 
@@ -522,6 +534,8 @@ if __name__ == '__main__':
                         col = colors.HexColor(col)
                     else: col = getattr(colors, col, None)
                     if col: lineage_colors[lc[0]] = col
-        proj.process_tree(lineage_colors or None, args.reroot_at_midpoint)
-    if args.draw_tree: 
-        proj.draw_tree()
+        #process the tree
+        proj.process_tree(collapse=args.collapse_genera, 
+                          collapse_min_nodes=args.collapse_genera[0] if args.collapse_genera else 3, 
+                          reroot=args.reroot_at_midpoint,
+                          lineage_colors=lineage_colors)
