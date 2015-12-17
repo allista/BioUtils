@@ -375,11 +375,13 @@ class EC_Analyzer(object):
             lineage = Lineage.common(lineages)
             if lineage: lineage = lineage-self.lineage
         if lineage and lineage != parent_lineage:
-            lastlin = lineage.last
             if bigclade and node.parent_node and node.is_internal():
-                node.edge.label = lastlin
+                node.edge.label = lineage.last
             if lineage_colors:
-                col = lineage_colors.get(lastlin)
+                col = None
+                for l in list(lineage)[::-1]:
+                    col = lineage_colors.get(l)
+                    if col: break
                 #construct color meta for Dendroscope
                 if col:
                     for cn in node.preorder_iter():
