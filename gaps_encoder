@@ -26,18 +26,8 @@ import dendropy as dp
 from dendropy.datamodel.charstatemodel import BinaryStateAlphabet
 from dendropy.datamodel.charmatrixmodel import CharacterSubset
 import argparse
-from contextlib import contextmanager
 
-isatty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
-
-@contextmanager
-def user_message(msg):
-    print msg+' ',
-    sys.stdout.flush()
-    try: yield
-    finally:
-        sys.stdout.write('Done\n')
-        sys.stdout.flush()
+from BioUtils.CommonTools import user_message, Progress
 
 class GapEncoder(object):
     '''Encode gaps information from an alignment into a binary data-matrix 
@@ -49,21 +39,6 @@ class GapEncoder(object):
                   'rna' : dp.RnaCharacterMatrix, 
                   'nucleotide' : dp.NucleotideCharacterMatrix, 
                   'protein' : dp.ProteinCharacterMatrix }
-    
-    progress_len  = '      '
-    progress_back = '\b'*len(progress_len)
-    
-    @classmethod
-    def _print_progress(cls, progress, total):
-        sys.stdout.write('%s[%3.0f%%]' % 
-                         (cls.progress_back if isatty else ' ',
-                          (float(progress)+1)/total*100.0))
-        sys.stdout.flush()
-        
-    @classmethod
-    def _preprogress(cls, msg):
-        print msg, cls.progress_len if isatty else '',
-        sys.stdout.flush()
     
     def __init__(self, filename, datatype, schema=None, variable_only=False, for_mrbayes=False):
         self._in_filename   = filename
@@ -158,12 +133,12 @@ class GapEncoder(object):
     def parse_data(self):
         self._load_data()
         #recode data elements into binary gap data
-        self._preprogress('Encoding gaps...')
+        Progress.start('Encoding gaps...')
         self._gaps_matrix = dp.StandardCharacterMatrix(default_state_alphabet=BinaryStateAlphabet(allow_missing=True))
         bin_alphabet = self._gaps_matrix.default_state_alphabet 
         self._gaps_matrix.taxon_namespace = self._orig_matrix.taxon_namespace
         for i, (taxon, seq) in enumerate(self._orig_matrix.items()):
-            self._print_progress(i, self._num_taxa)
+            Progress.step(i, self._num_taxa)
             self._gaps_matrix[taxon] = dp.CharacterDataSequence()
             for char in seq:
                 if char.symbol is self._orig_matrix.default_state_alphabet.no_data_symbol:
@@ -174,30 +149,30 @@ class GapEncoder(object):
         #if only variable columns are needed, pick them
         if self._variable_only:
             var_indices = []
-            self._preprogress('\nSelecting variable sites...')
+            Progress.start('\nSelecting variable sites...')
             taxons = list(self._gaps_matrix.values())
             first_t = taxons[0]
             taxons = taxons[1:]
             for c in xrange(self._alignment_len):
-                self._print_progress(c, self._alignment_len)
+                Progress.step(c, self._alignment_len)
                 char = first_t[c]
                 for taxon in taxons:
                     if char != taxon[c]:
                         var_indices.append(c)
                         break
             if var_indices:
-                self._preprogress('\nRemoving non-variable sites...')
+                Progress.start('\nRemoving non-variable sites...')
                 for i, sec in enumerate(self._gaps_matrix.values()):
-                    self._print_progress(i, self._num_taxa)
+                    Progress.step(i, self._num_taxa)
                     for idx in range(len(sec)-1, -1, -1):
                         if idx not in var_indices:
                             del(sec[idx])
                 self._gaps_len = len(self._gaps_matrix.values().next()) if self._gaps_matrix else 0
                 num_subsets = len(self._orig_matrix.character_subsets)
                 if num_subsets: 
-                    self._preprogress('\nReindexing subsets of sites...')
+                    Progress.start('\nReindexing subsets of sites...')
                     for i, s_label in enumerate(self._orig_matrix.character_subsets):
-                        self._print_progress(i, num_subsets)
+                        Progress.step(i, num_subsets)
                         orig_subset = self._orig_matrix.character_subsets[s_label]
                         new_subset_indices = [var_indices.index(i) for i in orig_subset.character_indices 
                                               if i in var_indices] 
@@ -258,9 +233,9 @@ class GapEncoder(object):
             #add comment for mrbayes
             begin_sets = False
             charsets   = []
-            self._preprogress('Processing data...')
+            Progress.start('Processing data...')
             for i, line in enumerate(nexus_lines):
-                self._print_progress(i, num_lines)
+                Progress.step(i, num_lines)
                 words = line.split()
                 if not words: continue
                 if  self._for_mrbayes and self._gaps_matrix \

@@ -1,0 +1,527 @@
+#!/usr/bin/python
+# coding=utf-8
+#
+# Copyright (C) 2015 Allis Tauri <allista@gmail.com>
+# 
+# degen_primer is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# degen_primer is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See the GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along
+# with this program.  If not, see <http://www.gnu.org/licenses/>.
+'''
+Created on Dec 7, 2015
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import sys, os, time, argparse
+from collections import OrderedDict
+
+from Bio.KEGG import REST
+from Bio.KEGG import Enzyme
+from Bio.Alphabet import IUPAC
+from Bio.Seq import Seq
+from Bio.SeqRecord import SeqRecord
+from Bio import SeqIO
+from Bio.Align.Applications import MuscleCommandline, MafftCommandline
+from Bio.Phylo.Applications import FastTreeCommandline
+from reportlab.lib import colors
+import dendropy as dp
+from xml.etree import ElementTree
+
+from BioUtils.CommonTools import user_message, Progress, isatty, ncpu
+
+RETRIES = 3
+PAUSE = 5
+
+def KEGG_cmd(cmd, args, outfile, emsg, force=False):
+    if not force and os.path.isfile(outfile): return True
+    for _try in xrange(RETRIES):
+        try: 
+            request = cmd(args)
+            with open(outfile, 'w') as out:
+                out.write(request.read())
+            return True
+        except Exception, ex:
+            print ex
+            if _try < RETRIES-1: time.sleep(PAUSE)
+            else: print emsg 
+    return False
+    
+
+class kgene(object):
+    '''Represents KEGG's gene database entry in the form organism:gen_id'''
+    def __init__(self, org, gid):
+        self.org = org
+        self.id  = gid
+        self.request = "%s:%s" % (self.org, self.id) 
+        self.filename = "%s-%s.kegg" % (self.org, self.id) 
+    
+    def __str__(self): return self.request
+#end class
+
+class Lineage(tuple):
+    '''Handles lineage information'''
+    
+    def __new__(cls, line, delimiter=';'):
+        line = line.strip('\n\r')
+        return  tuple.__new__(cls, line.split(delimiter))
+    
+    def __init__(self, line, delimiter=';'):
+        self.str = ':'.join(self).lower()
+        
+    def __str__(self): return self.str
+    
+    def __eq__(self, other):
+        return self.str == other.str
+    
+    def __sub__(self, other):
+        return Lineage(self.str.replace(other.str, '', 1).strip(':'), delimiter=':')
+        
+    @property
+    def last(self):
+        if not self: return None
+        return self[len(self)-1]
+    
+    def includes(self, other):
+        return other.str.startswith(self.str)
+    
+    @classmethod
+    def common(cls, lineages, delimiter=':'):
+        if not lineages: return None
+        i = 0
+        common = []
+        lineages = list(lineages)
+        while True:
+            clades = set()
+            for l in lineages:
+                if isinstance(l, str):
+                    l = Lineage(l, delimiter)
+                if not isinstance(l, Lineage):
+                    raise ValueError('Unsupported lineage type: %s' % type(l))
+                if len(l) <= i:
+                    clades.clear() 
+                    break
+                if len(clades) > 0:
+                    if clades.add(l[i]): break
+                else: clades.add(l[i])
+            if len(clades) != 1: break
+            common.append(clades.pop())
+            i += 1
+        return cls(';'.join(common))
+#end class
+
+class Organism(object):
+    '''Holds a KEGG's organism record as returned by /list/organism REST command'''
+    def __init__(self, line=None):
+        self.T = ""
+        self.org = ""
+        self.description = ""
+        self.lineage = None
+        if line is not None: self.parse(line)
+        
+    def __str__(self):
+        return '%s: %s [%s]' % (self.org, self.description, self.lineage)
+    
+    def parse(self, line):
+        fields = line.split('\t')
+        if len(fields) < 4:
+            raise ValueError("Organism line should have three fields divided by tabs")
+        self.T = fields[0]
+        self.org = fields[1]
+        self.description = fields[2]
+        self.lineage = Lineage(fields[3])
+        
+    def belongs2(self, lineage):
+        return lineage.includes(self.lineage)
+#end class
+
+class Organisms(dict):
+    '''Representation and parser for KEGG's organism list'''
+    def __init__(self, filename=None):
+        dict.__init__(self)
+        self.parse(filename)
+        
+    def parse(self, filename):
+        if not filename or not os.path.isfile(filename): return False
+        print 'Parsing the list of organisms...'
+        with open(filename) as inp:
+            for line in inp:
+                try: org = Organism(line)
+                except ValueError, er:
+                    print 'Unable to parse organism info: %s' % line
+                    print er
+                    continue
+                self[org.org] = org
+                if org.description: self[org.description] = org
+        return True
+#end class
+
+class KEGGRecord(dict):
+    '''Generic representation of the the KEGG file format'''
+    def __init__(self):
+        dict.__init__(self)
+        self.entry = ""
+        self.description = ""
+        
+    def __str__(self):
+        return 'ENTRY: %s\t%s\n%s' % (self.entry, self.description, dict.__str__(self))
+    
+    @classmethod
+    def parse(cls, filename):
+        if not filename or not os.path.isfile(filename): return
+        with open(filename) as inp:
+            record = cls()
+            keyword = ""
+            for line in inp:
+                if line[:3] == '///':
+                    yield record
+                    record = cls()
+                    continue
+                if line[:12] != "            ":
+                    keyword = line[:12].strip()
+                data = line[12:].strip()
+                if keyword == "ENTRY":
+                    words = data.split()
+                    record.entry = words[1]
+                    record.description = " ".join(words[1:])
+                field = record.get(keyword, None)
+                if field is None:
+                    field = []
+                    record[keyword] = field
+                field.append(data)
+#end class
+
+class EC_Analyzer(object):
+
+    organisms = Organisms()
+    orgfile   = 'organisms.kegg'
+    aligners  = ('mafft', 'muscle')
+    
+    def __init__(self, proj, ec, lineage):
+        self.proj = proj
+        self.ec = ec
+        self.lineage = Lineage(lineage)
+        self.genes = None
+        self.alignment = None
+        self.tree = None
+
+        namebase = '%s-EC_%s' % (self.proj, self.ec)
+        self.recfile   = namebase+'.kegg'
+        self.genesdir  = namebase+'-GENES'
+        self.ialnfile  = namebase+'-ialn.faa'
+        self.oalnfile  = namebase+'-aln.faa'
+        self.treefile  = namebase+'-aln.tre'
+        self.otreefile = namebase+'-aln.out.tre'
+        self.xtreefile = namebase+'-aln.out.nexml'
+        
+    @classmethod
+    def get_organisms(cls, force = False):
+        if not force and len(cls.organisms) > 0: return True
+        print 'Fetching the list of organisms...'
+        if not KEGG_cmd(REST.kegg_list, 'organism', 
+                    cls.orgfile, 'Unable to get the list of KEGG organisms', force=force):
+            return False
+        cls.organisms = Organisms(cls.orgfile)
+        return True
+    
+    @classmethod
+    def clade_phylogeny(cls, clade):
+        with open(clade) as inp:
+            for line in inp:
+                if not line: continue
+                words = line.split()
+                desc = " ".join(words[1:])
+                org = cls.organisms.get(desc)
+                if org: print org.lineage[1:3], org.description
+    
+    def get_data(self, force = False):
+        print 'Fetching KEGG record for EC: %s'  % self.ec
+        #make a directory to store gene files
+        try: os.mkdir(self.genesdir)
+        except OSError: pass
+        #fetch a record for the needed enzyme
+        if not KEGG_cmd(REST.kegg_get, 'ec:'+self.ec, 
+                        self.recfile, 'Unable to get record for EC: %s' % self.ec):
+            return False
+        #parse the record
+        with user_message('Parsing KEGG record...'):
+            records = Enzyme.parse(open(self.recfile))
+            self.genes = OrderedDict(((g, kgene(gr[0].lower(), g)) for r in records for gr in r.genes for g in gr[1]))
+        #analyze genes
+        print 'Fetching and parsing gene records...'
+        self.alignment = OrderedDict()
+        numgenes = len(self.genes)
+        os.chdir(self.genesdir)
+        for i, gene in enumerate(self.genes.values()):
+            progress = float(i+1)/numgenes*100.0
+            print 'Checking source organism  [%3.0f%%]: %s' % (progress, gene.org)
+            org = self.organisms.get(gene.org)
+            if org is None:
+                print 'No such organism in the DB: %s\n' % gene.org
+                print 'Try to run with -f option to update the list of organisms.'
+                continue
+            if not org.belongs2(self.lineage):
+                print 'Organism "%s (%s)"\nis filtered by lineage "%s"\n' % (gene.org, org.lineage, self.lineage)
+                continue
+            sys.stdout.flush()
+            if not os.path.isfile(gene.filename):
+                print 'Fetching gene information [%3.0f%%]: %s' % (progress, gene)
+                KEGG_cmd(REST.kegg_get, gene, gene.filename, 
+                         'Unable to get record for gene: %s' % gene, force)
+            print 'Parsing gene information  [%3.0f%%]: %s' % (progress, gene.id)
+            for gr in KEGGRecord.parse(gene.filename):
+                plines = gr.get('AASEQ')[1:]
+                if not plines:
+                    print 'No AASEQ field in %s record' % gr.entry
+                    continue
+                sseq = ''.join(plines)
+                shash = hash(sseq)
+                if shash in self.alignment:
+                    print '%s sequence is the exact same as %s' % (gene.id, self.alignment[shash].id)
+                    self.alignment[shash].description += ', '+org.description
+                else: 
+                    self.alignment[shash] = SeqRecord(Seq(sseq, IUPAC.IUPACProtein), gene.id, 
+                                                 description=org.description)
+            print
+        #write initial alignment
+        os.chdir('..')
+        with open(self.ialnfile, 'w') as out:
+            SeqIO.write(self.alignment.values(), out, 'fasta')
+        print 'Done\n'
+            
+    def _file_exists(self, filename, atty_msg, msg):
+        if os.path.isfile(self.oalnfile):
+            print 'The %s is already exists.' % filename
+            if isatty:
+                inp = raw_input('%s [y/n]: ' % atty_msg)
+                if inp.lower() != 'y': return True
+            else:
+                print '%s, remove/rename the "%s" file and try again.\n' % (msg, filename)
+                return True
+        return False
+    
+    def align_data(self, method=None):
+        if not os.path.isfile(self.ialnfile):
+            print 'No input alignment to align.'
+            return False
+        print 'Aligning amino acid sequences...'
+        if self._file_exists(self.oalnfile, 
+                             'Are you sure you want to re-run the alignment tool?',
+                             'To re-run the alignment tool'):
+            return True
+        print 'This may take quite a while...'
+        if method == 'muscle':
+            cline = MuscleCommandline(input=self.ialnfile, out=self.oalnfile)
+            print cline
+            stdout, stderr = cline()
+            print stdout
+        else: #default
+            cline = MafftCommandline(thread=ncpu, auto=True, input=self.ialnfile)
+            stdout, stderr = cline()
+            with open(self.oalnfile, 'wb') as out:
+                out.write(stdout)
+        if stderr: sys.stderr.write(stderr)
+        print 'Done\n'
+        return True
+        
+    def fasttree_alignment(self):
+        if not os.path.isfile(self.oalnfile):
+            print 'No alignment to build a tree with'
+            return False
+        if self._file_exists(self.treefile, 
+                         'Are you sure you want to re-run the fasttree?',
+                         'To re-run the fasttree'):
+            return True
+        print 'Building an approximate-ML tree with fasttree.'
+        cline = FastTreeCommandline(input=self.oalnfile, out=self.treefile, pseudo=True)
+        print cline
+        print 'This may take quite a while...'
+        stdout, stderr = cline()
+        print stdout
+        if stderr: sys.stderr.write(stderr)
+        print 'Done\n'
+        return True
+    
+    def _set_node_taxonomy(self, node, parent_lineage, lineage_colors=None):
+        '''
+        Sets edge labels to clade names.
+        Optionally, to colorize for Dendroscope we add a meta annotation looking like this:
+        <meta content=" fg=255 0 0 w=2 ip= &lt; 2.447 1822.0&gt; dr=1;" datatype="xsd:string" id="meta72447" property="format" xsi:type="nex:LiteralMeta"/>
+        '''
+        lineage = Lineage.common((l.edge.lineage 
+                                  for l in node.leaf_iter()
+                                  if l.edge.lineage))-self.lineage
+        if lineage and lineage != parent_lineage:
+            lastlin = lineage.last
+            if node.parent_node and node.is_internal():
+                node.edge.label = lastlin
+            if lineage_colors:
+                col = lineage_colors.get(lastlin)
+                #construct color meta for Dendroscope
+                if col: node.edge.annotations.add_new('format', 
+                                                      ' fg=%d %d %d dr=1;' % col.rgb(),
+                                                      name_prefix='', namespace='',
+                                                      datatype_hint='xsd:string')
+        for child in node.child_node_iter():
+            self._set_node_taxonomy(child, lineage, lineage_colors)
+            
+    def process_tree(self, lineage_colors = None, reroot = False):
+        if not os.path.isfile(self.treefile):
+            print 'No tree file found.'
+            return False
+        with user_message('Processing tree file...'):
+            self.tree = dp.Tree.get(path=self.treefile, schema='newick')
+            if not self.tree:
+                print 'No tree loaded.'
+                return False
+            for leaf in self.tree.leaf_node_iter():
+                gene = self.genes.get(leaf.taxon.label.replace(' ', '_'))
+                if not gene: continue
+                org = self.organisms[gene.org]
+                if not org: continue
+                leaf.edge.lineage = org.lineage
+                leaf.taxon.label = '%s [%s]' % (org.description, gene.id)
+                leaf.label = leaf.taxon.label
+            self._set_node_taxonomy(self.tree.seed_node, None, lineage_colors)
+        if reroot:
+            with user_message('Rerooting tree at midpoint...'):
+                self.tree.reroot_at_midpoint()
+        with user_message('Saving resulting tree...'):
+            self.tree.write(path=self.otreefile, schema='newick')
+            self.tree.write(path=self.xtreefile, schema='nexml')
+        if lineage_colors:
+            with user_message('Tuning nexml file for Dendropy after colorization...'):
+                self._postprocess_nexml(self.xtreefile)
+        return True
+    
+    @staticmethod
+    def _add_meta(e, content, datatype, prop, i):
+        ElementTree.Element.tail = '\n'
+        e.insert(0, ElementTree
+                     .Element('meta', 
+                             {'content': content,
+                              'datatype': 'xsd:%s'%datatype, 'id':'imeta%d'%i, 'property': prop, 'xsi:type':'nex:LiteralMeta'}))
+    
+    def _postprocess_nexml(self, nexml_file):
+        tree = ElementTree.parse(nexml_file)
+        root = tree.getroot()
+        #clean up format metas
+        for meta in root.iter('meta'):
+            p = meta.get('property')
+            if p == ':format': meta.set('property', 'format')
+        #add the header
+        for i, t in enumerate(root.iter('tree')):
+            t.set('about', '#'+t.get('id'))
+            t.set('label', '[%d]'%(i+1))
+            t.set('xmlns:collapsed', '')
+            t.set('xmlns:default_edge_format', '')
+            t.set('xmlns:drawer', '')
+            t.set('xmlns:embellished', '')
+            t.set('xmlns:radiallabels', '')
+            t.set('xmlns:root', '')
+            t.set('xmlns:sparselabels', '')
+            t.set('xmlns:toscale', '')
+            t.set('xmlns:trans', '')
+            self._add_meta(t, " nh=2 nw=2 fg=0 0 0 bg=255 255 255 w=1 sh=0 fx=1 lc=0 0 0 lk=null ft='Ubuntu-ITALIC-13' lx=0 ly=0 ll=3 lv=1;", 
+                           'string', 'default_node_format', 0)
+            self._add_meta(t, " fg=0 0 0 w=1 sh=1 dr=1 lc=0 0 0 lk=null ft='Ubuntu-ITALIC-13' lx=0 ly=0 ll=11 lv=1;", 
+                           'string', 'default_edge_format', 1)
+            self._add_meta(t, "true", 'boolean', 'embellished', 2)
+            self._add_meta(t, "RectangularPhylogram", 'string', 'drawer', 3)
+            self._add_meta(t, "true", 'boolean', 'toscale', 4)
+            self._add_meta(t, "false", 'boolean', 'sparselabels', 5)
+            self._add_meta(t, "false", 'boolean', 'radiallabels', 6)
+            self._add_meta(t, "", 'string', 'collapsed', 7)
+        #add dummy metas
+        tags = ('node', 'edge')
+        for i, e in enumerate(root.iter()):
+            if not e.tag in tags: continue
+            if e.find('meta') is not None: continue
+            if e.tag == 'edge':
+                self._add_meta(e, " fg=0 0 0 dr=1;", 'string', 'format', 8+i)
+            else: self._add_meta(e, ";", 'string', 'format', 8+i)
+        tree.write(self.xtreefile, xml_declaration=True, encoding='utf-8', )
+    
+    def draw_tree(self):
+        if not self.tree:
+            print 'No tree to draw.'
+            return False
+#        import pylab
+#        with user_message('Drawing the tree...'):
+#            Phylo.draw(self.tree)
+#            pylab.show()
+#            pylab.savefig(self.xtreefile+'.png')
+#end class
+        
+
+if __name__ == '__main__':
+    #parse command line
+    parser = argparse.ArgumentParser(description='Fetches all protein sequences '
+                                     'for a given EC number from KEGG database, '
+                                     'filters them according to given lineage '
+                                     'and optionally aligns them using MUSCLE '
+                                     'or Mafft, builds a tree with FastTree.')
+    parser.add_argument('project', metavar='project_name',
+                        type=str, nargs=1,
+                        help='Name of the project')
+    parser.add_argument('EC', metavar='EC_number',
+                        type=str, nargs=1,
+                        help='EC number of the enzyme to analyze')
+    parser.add_argument('-l', '--lineage', metavar='"Phylum;Class;..."', default=None,
+                        type=str, nargs=1,
+                        help='Lineage of interest given as string with clades '
+                        '(from top to bottom) separated by semicolon')
+    parser.add_argument('-f', '--force', action='store_true',
+                        help='Forces fetching of all the data from the KEGG.')
+    parser.add_argument('-a', '--align-with', metavar=EC_Analyzer.aligners[0],
+                        type=str, nargs=1,
+                        help='Align obtained sequences using selected method. '
+                        'Supported methods: %s' % ' '.join(EC_Analyzer.aligners))
+    parser.add_argument('-t', '--build-tree', action='store_true',
+                        help='Build phylogenetic tree with FastTree.')
+    parser.add_argument('-r', '--reroot-at-midpoint', action='store_true',
+                        help='Reroot resulting tree at midpoint.')
+    parser.add_argument('-d', '--draw-tree', action='store_true',
+                        help='Draw resulting tree.')
+    parser.add_argument('-c', '--colors', metavar='"archaea:#f3ad6;bacteria:blue"',
+                        type=str, nargs=1,
+                        help='Colorize tree edges by phylogeny using provided colors '
+                        'for Dendroscope. Both html notation and predefined color '
+                        'names are supported. NOTE: this will produce a non-valid '
+                        'NeXML file readable only by Dendroscope.')
+    args = parser.parse_args()
+    
+    #parse lineage, and start the project
+    lineage = args.lineage[0] if args.lineage else ''
+    proj = EC_Analyzer(args.project[0], args.EC[0], lineage)
+    #get database of organisms
+    EC_Analyzer.get_organisms(force=args.force)
+    #get the genes to analyze
+    proj.get_data(force=args.force)
+    #align if requested
+    if args.align_with: 
+        proj.align_data(args.align_with)
+    #build the tree if requested
+    if args.build_tree:
+        proj.fasttree_alignment()
+        if args.colors:
+            lineage_colors = dict()
+            for col in args.colors[0].split(';'): 
+                lc = col.strip().split(':') 
+                if len(lc) == 2: 
+                    col = lc[1]
+                    if col.startswith('#'):
+                        col = colors.HexColor(col)
+                    else: col = getattr(colors, col, None)
+                    if col: lineage_colors[lc[0]] = col
+        proj.process_tree(lineage_colors or None, args.reroot_at_midpoint)
+    if args.draw_tree: 
+        proj.draw_tree()

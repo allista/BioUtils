@@ -21,8 +21,8 @@ Created on Dec 11, 2015
 @author: Allis Tauri <allista@gmail.com>
 '''
 
-import sys, os, re, tempfile
-from contextlib import contextmanager
+import os, re, tempfile
+from BioUtils.CommonTools import isatty
 
 from reportlab.lib import colors
 from reportlab.lib.units import cm
@@ -34,17 +34,6 @@ from Bio.SeqRecord import SeqRecord
 from Bio.Blast.Applications import NcbiblastnCommandline
 from Bio.Blast import NCBIXML
 from Bio.Alphabet import IUPAC, NucleotideAlphabet, ProteinAlphabet
-
-isatty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
-
-@contextmanager
-def user_message(msg):
-    print msg,
-    sys.stdout.flush()
-    try: yield
-    finally:
-        sys.stdout.write('Done\n')
-        sys.stdout.flush()
 
 class ClusterProject(object):
     

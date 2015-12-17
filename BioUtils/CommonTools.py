@@ -19,17 +19,40 @@ Created on Jul 20, 2012
 @author: Allis Tauri <allista@gmail.com>
 '''
 
+import sys
 import string
 import random
+from contextlib import contextmanager
+import multiprocessing
 
+isatty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
+ncpu = multiprocessing.cpu_count()
 
-def print_exception(e):
-    print '\n%s: error code %s; %s\n' % (type(e).__name__,
-                                         hasattr(e, 'errno') and str(e.errno) or 'N/A',  
-                                         e.message or 'no message.')
-#end def    
+class Progress(object):
 
+    progress_len  = '      '
+    progress_back = '\b'*len(progress_len)
+    
+    @classmethod
+    def step(cls, progress, total):
+        sys.stdout.write('%s[%3.0f%%]' % 
+                         (cls.progress_back if isatty else ' ',
+                          (float(progress)+1)/total*100.0))
+        sys.stdout.flush()
+    
+    @classmethod
+    def start(cls, msg):
+        print msg, cls.progress_len if isatty else '',
+        sys.stdout.flush()
+    
+@contextmanager
+def user_message(msg):
+    print msg,
+    sys.stdout.flush()
+    try: yield
+    finally:
+        sys.stdout.write(' Done\n')
+        sys.stdout.flush()
 
 def random_text(length):
     return ''.join(random.choice(string.ascii_uppercase + string.digits) for _unused in xrange(length))
-#end def

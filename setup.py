@@ -53,7 +53,7 @@ setup(name='seqconv',
                'alien2gb',
                'gbfix',
                'rename_genomes',
-               'analyze_family',
+               'analyze_ec',
                ],
       #data_files=[('share/applications', ['DegenPrimer.desktop'])]
       )
