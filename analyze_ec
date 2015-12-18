@@ -229,6 +229,7 @@ class EC_Analyzer(object):
         self.treefile  = namebase+'-aln.tre'
         self.otreefile = namebase+'-aln.out.tre'
         self.xtreefile = namebase+'-aln.out.nexml'
+        self.dtreefile = namebase+'-aln.out.dot'
         
     @classmethod
     def get_organisms(cls, force = False):
@@ -376,7 +377,7 @@ class EC_Analyzer(object):
             if lineage: lineage = lineage-self.lineage
         if lineage and lineage != parent_lineage:
             if bigclade and node.parent_node and node.is_internal():
-                node.edge.label = lineage.last
+                node.edge.label = lineage.last.capitalize()
             if lineage_colors:
                 col = None
                 for l in lineage[::-1]:
@@ -435,6 +436,8 @@ class EC_Analyzer(object):
         with user_message('Saving resulting tree...'):
             self.tree.write(path=self.otreefile, schema='newick')
             self.tree.write(path=self.xtreefile, schema='nexml')
+            with open(self.dtreefile, 'w') as out:
+                self.tree.write_as_dot(out, edge_formatter=lambda e: e.label or '')
         with user_message('Tuning nexml file for Dendroscope...'):
             self._postprocess_nexml(self.xtreefile)
         return True
