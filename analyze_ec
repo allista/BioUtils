@@ -358,7 +358,7 @@ class EC_Analyzer(object):
         print 'Done\n'
         return True
     
-    def _set_node_taxonomy(self, node, parent_lineage, collapse, collapse_min_nodes, lineage_colors):
+    def _set_node_taxonomy(self, node, parent_lineage, collapse_genera, collapse_min_nodes, lineage_colors):
         '''
         Sets edge labels to clade names.
         Optionally, "collapse" (in Dendroscope's sense) genus nodes
@@ -367,7 +367,7 @@ class EC_Analyzer(object):
         bigclade = len(lineages) >= collapse_min_nodes 
         if bigclade and Lineage.allsame(lineages):
             lineage = lineages[0]-self.lineage
-            if collapse and lineage != parent_lineage:
+            if collapse_genera and lineage != parent_lineage:
                 for cn in node.preorder_internal_node_iter():
                     cn.annotations.add_new('collapse', '', 
                                            datatype_hint='xsd:string')
@@ -379,7 +379,7 @@ class EC_Analyzer(object):
                 node.edge.label = lineage.last
             if lineage_colors:
                 col = None
-                for l in list(lineage)[::-1]:
+                for l in lineage[::-1]:
                     col = lineage_colors.get(l)
                     if col: break
                 #construct color meta for Dendroscope
@@ -389,12 +389,26 @@ class EC_Analyzer(object):
                                                     ' fg=%d %d %d;' % col.bitmap_rgb(),
                                                     datatype_hint='xsd:string')
         for child in node.child_node_iter():
-            self._set_node_taxonomy(child, lineage, collapse, collapse_min_nodes, lineage_colors)
+            self._set_node_taxonomy(child, lineage, collapse_genera, collapse_min_nodes, lineage_colors)
             
-    def process_tree(self, collapse = False, collapse_min_nodes=3, reroot = False, lineage_colors=None):
+    def process_tree(self, **kwargs):
+        '''
+        Accepted kwargs:
+        collapse_genera : bool : changes display method of genus subtrees in Dendroscope to trapezium nodes
+        collapse_min_nodes : int : only collapse subtrees with number of leafs greater or equal than this
+        min_support : float : nodes with support less that this will be removed from the tree, children being relinked to parents
+        reroot_at_midpoint : bool : reroots the tree at mid-point
+        lineage_colors : dict : a dictionary of colors in html or color-name notation with lowercase taxons as keys
+        '''
         if not os.path.isfile(self.treefile):
             print 'No tree file found.'
             return False
+        #parse args
+        collapse_genera = kwargs.pop('collapse_genera', False)
+        collapse_min_nodes = kwargs.pop('collapse_min_nodes', 3)
+        reroot = kwargs.pop('reroot_at_midpoint', False)
+        min_support = kwargs.pop('min_support', False)
+        lineage_colors = kwargs.pop('lineage_colors', None)
         with user_message('Processing tree file...'):
             self.tree = dp.Tree.get(path=self.treefile, schema='newick')
             if not self.tree:
@@ -408,7 +422,13 @@ class EC_Analyzer(object):
                 leaf.edge.lineage = org.lineage
                 leaf.taxon.label = '%s [%s]' % (org.description, gene.id)
                 leaf.label = leaf.taxon.label
-            self._set_node_taxonomy(self.tree.seed_node, None, collapse, collapse_min_nodes, lineage_colors)
+            if min_support:
+                for node in self.tree.postorder_internal_node_iter(exclude_seed_node=True):
+                    try: support = float(node.label)
+                    except ValueError: pass
+                    if support < min_support and node.edge:
+                        node.edge.collapse(adjust_collapsed_head_children_edge_lengths=True)
+            self._set_node_taxonomy(self.tree.seed_node, None, collapse_genera, collapse_min_nodes, lineage_colors)
         if reroot:
             with user_message('Rerooting tree at midpoint...'):
                 self.tree.reroot_at_midpoint()
@@ -469,7 +489,7 @@ class EC_Analyzer(object):
             n.setAttribute('about', '#'+n.getAttribute('id'))
             self._add_meta(n, ' ;', 'string', 'format', 100+i)
         with open(self.xtreefile, 'w') as out:
-            out.write(d.toprettyxml(encoding='utf-8'))
+            out.write(d.toxml(encoding='utf-8'))
 #end class
         
 
@@ -500,6 +520,9 @@ if __name__ == '__main__':
                         help='Build phylogenetic tree with FastTree.')
     parser.add_argument('-r', '--reroot-at-midpoint', action='store_true',
                         help='Reroot resulting tree at midpoint.')
+    parser.add_argument('-m', '--min-support', default=None, metavar='float [0:1]',
+                        type=float, nargs=1,
+                        help='Collapse splits with support < min-support.')
     parser.add_argument('-c', '--collapse-genera', default=None, metavar='N',
                         type=int, nargs=1,
                         help='Collapse genera with number of nodes >= N to '
@@ -537,7 +560,8 @@ if __name__ == '__main__':
                     else: col = getattr(colors, col, None)
                     if col: lineage_colors[lc[0]] = col
         #process the tree
-        proj.process_tree(collapse=args.collapse_genera, 
-                          collapse_min_nodes=args.collapse_genera[0] if args.collapse_genera else 3, 
-                          reroot=args.reroot_at_midpoint,
+        proj.process_tree(collapse_genera=args.collapse_genera, 
+                          collapse_min_nodes=args.collapse_genera[0] if args.collapse_genera else 3,
+                          min_support=args.min_support[0] if args.min_support else None,
+                          reroot_at_midpoint=args.reroot_at_midpoint,
                           lineage_colors=lineage_colors)
