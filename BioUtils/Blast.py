@@ -225,24 +225,39 @@ class LocalBlast(MultiprocessingBase):
             os.unlink(bout)
         return None
     
-    def r2r_blast_batch(self, queries, subjects, evalue=0.001, max_rlen=0, command='blastn', **kwargs):
+    def r2r_blast_batch(self, queries, subjects, subject_locs=None, evalue=0.001, max_rlen=0, command='blastn', **kwargs):
+        results = self._r2r_blast_batch(queries, subjects, subject_locs, evalue, max_rlen, command, **kwargs)
+        if not results: return None
+        for qi in xrange(len(results)):
+            for si in xrange(len(results[qi])):
+                hsps_name = results[qi][si]
+                if not hsps_name: continue
+                with roDict(hsps_name) as db:
+                    results[qi][si] = db['result']
+        return results
+    
+    def _r2r_blast_batch(self, queries, subjects, subject_locs=None, evalue=0.001, max_rlen=0, command='blastn', **kwargs):
         queries_len = len(queries)
         subjects_len = len(subjects)
         results = [[None for _s in subjects] for _q in queries]
         pairs = list(itertools.product(xrange(queries_len), xrange(subjects_len)))
         @MultiprocessingBase.data_mapper
         @shelf_result
-        def _worker(qs, queries, subjects):
+        def _worker(qs, queries, subjects, subject_locs):
             query = queries[qs[0]]
             subject = subjects[qs[1]]
             if query is None or subject is None: return None
+            if subject_locs and subject_locs[qs[1]]: 
+                loc = tuple(subject_locs[qs[1]])
+                kwargs['subject_loc'] = '%d-%d' % loc
+            elif 'subject_loc' in kwargs: del kwargs['subject_loc']
             return LocalBlast.r2r_blast(query, subject, evalue, max_rlen, command, **kwargs)
         @MultiprocessingBase.results_assembler
         def _assembler(index, hsps, results, pairs):
             qs = pairs[index]
             results[qs[0]][qs[1]] = hsps
         work = self.Work()
-        work.prepare_jobs(_worker, pairs, None, queries, subjects)
+        work.prepare_jobs(_worker, pairs, None, queries, subjects, subject_locs)
         work.set_assembler(_assembler, results, pairs)
         self.start_work(work)
         if not self.wait(work): return None
@@ -251,21 +266,22 @@ class LocalBlast(MultiprocessingBase):
     @staticmethod
     @MultiprocessingBase.data_mapper
     @shelf_result
-    def _translate_cds(fi, seq, table):
-        f = seq.features[fi]
-        sseq = f.extract(seq)
+    def _translate_genes(fi, rec, table):
+        f = rec.features[fi]
+        srec = f.extract(rec)
         try: 
-            tseq = SeqRecord(sseq.seq.translate(table),
-                             id=seq.id, name=seq.name,
-                             description=seq.description)
-            pf = SeqFeature(FeatureLocation(0, len(tseq)), 
+            tsec = srec.seq.translate(table)
+            if tsec[-1] == '*': tsec = tsec[:-1]
+            trec = SeqRecord(tsec,
+                             id=rec.id, name=rec.name,
+                             description=rec.description)
+            pf = SeqFeature(FeatureLocation(0, len(trec)), 
                             id=f.id, type='CDS',
                             qualifiers=f.qualifiers)
-            tseq.features.append(pf)
+            trec.features.append(pf)
         except:
-            print 'Unable to translate %s' % sseq 
-            return None
-        return tseq 
+            raise RuntimeError('Unable to translate: %s' % str(srec.seq))
+        return trec 
     
     @staticmethod
     @MultiprocessingBase.results_assembler
@@ -274,10 +290,6 @@ class LocalBlast(MultiprocessingBase):
             with roDict(tname) as db:
                 translations[index] = db['result']
             cleanup_file(tname)
-    
-    @staticmethod
-    def percent_identity(hsp):
-        return float(hsp.identities)/hsp.align_length
     
     @staticmethod
     @MultiprocessingBase.data_mapper
@@ -290,9 +302,23 @@ class LocalBlast(MultiprocessingBase):
             print 'no hsps in %s: %s' % (hsps_name, hsps)  
             return None
         hsp = min(hsps, key=lambda h: h.expect)
+#        print '\n'+'='*80
+#        for h in hsps:
+#            if h is hsp:
+#                print '*'*80
+#                print h
+#                print '*'*80
+#            else: print h
+#            print
+#        print '-'*80
         for f in translations[qs[1]].features:
-            if hsp.sbjct_start in f or hsp.sbjct_end in f:
-                return f, hsp.align_length, LocalBlast.percent_identity(hsp), hsp.expect
+#            print f.qualifiers.get('locus_tag'), f.location, '%d-%d' % (hsp.sbjct_start, hsp.sbjct_end), \
+#                  'MATCH' if hsp.sbjct_start-1 in f and hsp.sbjct_end-1 in f else ''
+            if hsp.sbjct_start-1 in f and hsp.sbjct_end-1 in f:
+                aln_len = abs(hsp.sbjct_start-hsp.sbjct_end)+1
+                return f, aln_len, float(hsp.identities)/aln_len, hsp.expect
+        print '\n'+'='*80
+        print
         return None
         
     @staticmethod
@@ -300,8 +326,7 @@ class LocalBlast(MultiprocessingBase):
         return [i for i, f in enumerate(record.features) if f.type == ftype]
         
     @staticmethod
-    def _get_features(ri, records):
-        rec = records[ri]
+    def _get_genes(rec):
         features = LocalBlast._features_of_type_i(rec, 'CDS')
         if not features:
             features = LocalBlast._features_of_type_i(rec, 'gene')
@@ -311,22 +336,33 @@ class LocalBlast(MultiprocessingBase):
                 return None
         return features
     
-    def _get_foi(self, records, foi):
+    def _get_fois(self, records, foi):
         for q in foi: foi[q] = re.compile(foi[q])
         num_records = len(records)
         def _get_foi(ri, records, foi):
             r = records[ri]
             features = []
-            for f in r.features:
+            for fi, f in enumerate(r.features):
                 for q in foi:
                     qv = f.qualifiers.get(q)
                     if qv and foi[q].search(qv[0]):
-                        features.append(f)
+                        features.append(fi)
+            for fi, f in enumerate(features):
+                srec = r.features[f].extract(r)
+                genes = self._get_genes(srec)
+                if genes: features[fi] = [srec.features[gi].qualifiers.get('gene_id') for gi in genes]
             return features
-        features = self.parallelize_work(1, _get_foi, range(num_records), records, foi)
-        return features
+        return self.parallelize_work(1, _get_foi, range(num_records), records, foi)
     
-    _pgap = 'X'*20
+    @staticmethod
+    def _cat_records(records, gap='X', glen=20):
+        cat = None
+        gap = gap*glen
+        for t in records:
+            if t: 
+                if cat: cat += gap+t
+                else: cat = t
+        return cat
     
     def g2g_blastp(self, reference, subjects, table='Standard', 
                    evalue=0.001, max_rlen=0, features_of_interest=None):
@@ -340,7 +376,7 @@ class LocalBlast(MultiprocessingBase):
         @param evalue: filter out blastp results with E-value grater than this
         @param max_rlen: filter out blastp results which are shorter than this 
         fraction of target gene length
-        @param features_of_interest: dictionary of the form 
+        @param features_of_interest: list of dictionaries of the form 
         {qualifier_name : qualifier_value}
         to mark features denoting known clusters that should be analyzed one 
         against the other
@@ -361,7 +397,7 @@ class LocalBlast(MultiprocessingBase):
         with user_message('Searching for gene/CDS features in provided sequences...'):
             all_records = [reference]+subjects
             num_records = len(all_records)
-            features = self.parallelize_work(1, self._get_features, 
+            features = self.parallelize_work(1, lambda ri, records: self._get_genes(records[ri]), 
                                              range(num_records), 
                                              all_records)
             if not features or not features[0]:
@@ -376,37 +412,64 @@ class LocalBlast(MultiprocessingBase):
                 if not genes: continue
                 r = all_records[ri]
                 for gene_id, gi in enumerate(genes):
+                    r.features[gi].qualifiers['feature_id'] = gi
                     r.features[gi].qualifiers['gene_id'] = gene_id
         #get features of interest if requested
+        fois = None
         if features_of_interest:
             with user_message('Searching for features of interest...'):
-                foi = self._get_foi(all_records, features_of_interest)
-        else: foi = None
+                fois = []
+                for foi in features_of_interest:
+                    fois.append(self._get_fois(all_records, foi))
         #translate features to proteins
         with user_message('Translating genes found in the reference and subjects...'):
             translations = [None]*num_records
+            foi_translations = [[None]*num_records for _f in fois]
             for i, (f, rec) in enumerate(zip(features, all_records)):
-                if not f: continue  
+                if not f: continue
                 translation = [None]*len(f)
                 work = self.Work()
-                work.prepare_jobs(self._translate_cds, f, None, rec, table)
+                work.prepare_jobs(self._translate_genes, f, None, rec, table)
                 work.set_assembler(self._translation_assembler, translation)
                 self.start_work(work)
                 if not self.wait(work): return None
-                if i > 0:
-                    for t in translation:
-                        if not t: continue
-                        if translations[i]:
-                            translations[i] += self._pgap+t
-                        else: translations[i] = t
-                else: translations[i] = translation
+                if i > 0: 
+                    translations[i] = self._cat_records(translation)
+                    if fois:
+                        for ifoi, foi in enumerate(fois):
+                            foi_loc = [0, 0]
+                            for foi_var in foi[i]: 
+                                for gid in foi_var:
+                                    l = translations[i].features[gid].location
+                                    foi_loc[0] = min(int(l.start)+1, foi_loc[0]) if foi_loc[0] > 0 else int(l.start)+1
+                                    foi_loc[1] = max(int(l.end), foi_loc[1])
+                            if foi_loc[0] >= 0: foi_translations[ifoi][i] = foi_loc 
+                else: 
+                    translations[i] = translation
+                    if fois: 
+                        for ifoi, foi in enumerate(fois):
+                            foi_translations[ifoi][i] = [[translation[gid] for gid in foi_var] for foi_var in foi[i]]
+#DEBUG
+#        translations[1].name = 'TON'
+#        ch5 = self._cat_records(translations[0])
+#        ch5.name = 'TBCH5'
+#        SeqIO.write([ch5, translations[1]], 'trans-test.gb', 'gb')
         #blast features against subjects
         with user_message('Performing local blast of every translated gene in the reference against every translated subject...'):
             stranslations = translations[1:]
-            blast_results = self.r2r_blast_batch(translations[0], stranslations, evalue, 
-                                                 max_rlen, command='blastp', task='blastp')
+            blast_results = self._r2r_blast_batch(translations[0], stranslations, None, evalue, 
+                                                  max_rlen, command='blastp', task='blastp')
             if not blast_results: return None
-        #parse blast results
+            if fois: #redo blast for fois and replace the results
+                for ifoi, foi in enumerate(foi_translations):
+                    sfoi_locs = foi[1:]
+                    for i, foi_var in enumerate(foi[0]):
+                        foi_blast = self._r2r_blast_batch(foi_var, stranslations, sfoi_locs, evalue, 
+                                                          max_rlen, command='blastp', task='blastp')
+                        if not foi_blast: continue
+                        for gi, gid in enumerate(fois[ifoi][0][i]):
+                            blast_results[gid] = foi_blast[gi]
+        #process blast results
         with user_message('Searching for genes in subjects that overlap with top blast hits...'):
             pairs = list(itertools.product(xrange(len(translations[0])), xrange(len(stranslations))))
             work = self.Work()
@@ -446,7 +509,7 @@ class LocalBlast(MultiprocessingBase):
 #end class
         
 #tests
-import signal
+import signal, sys
 from time import sleep
 from DegenPrimer import tmpStorage
 
@@ -469,20 +532,28 @@ if __name__ == '__main__':
     signal.signal(signal.SIGTERM, sig_handler)
     signal.signal(signal.SIGQUIT, sig_handler)
     
+#    from DegenPrimer import MultiprocessingBase
+#    MultiprocessingBase.cpu_count = 1
     abort_event = Event()
     lb = LocalBlast(abort_event)
     
     with CommonTools.user_message('Loading genomes...'):
         genomes_dir = u'/home/allis/Dropbox/Science/Микра/Thermococcus/sequence/GenBank/Thermococcus'
-        genome_names = ['Thermococcus_barophilus_Ch5-complete.gb', 'Thermococcus_onnurineus_NA1-complete-genome.gb'] 
+        genome_names = ['Thermococcus_barophilus_Ch5-complete.gb', 
+                        'Thermococcus_onnurineus_NA1-complete-genome.gb',
+                        'Thermococcus_sp._ES1.gb',
+                        'Thermococcus-DS1-preliminary.gb'] 
         genomes = CommonTools.load_files(abort_event, [os.path.join(genomes_dir, f) for f in genome_names], 'gb') 
+    
+#    g1 = genomes[0][1460915:1521600]
+#    genomes = [genomes[1][1408604:1478016]]
     
     g1 = genomes[0]
     genomes = genomes[1:]
     
     @shelf_result
     def g2g2shelf():
-        return lb.g2g_blastp(g1, genomes, 11, features_of_interest={'ugene_name': 'FC-full'})
+        return lb.g2g_blastp(g1, genomes, 11, features_of_interest=[{'ugene_name': 'FC-full'}, {'ugene_name': 'COC-full'}])
         
     g2g_res = ''#'/tmp/DP-PCR-cz4Elt'
     if not os.path.isfile(g2g_res):
