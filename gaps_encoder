@@ -133,51 +133,51 @@ class GapEncoder(object):
     def parse_data(self):
         self._load_data()
         #recode data elements into binary gap data
-        Progress.start('Encoding gaps...')
-        self._gaps_matrix = dp.StandardCharacterMatrix(default_state_alphabet=BinaryStateAlphabet(allow_missing=True))
-        bin_alphabet = self._gaps_matrix.default_state_alphabet 
-        self._gaps_matrix.taxon_namespace = self._orig_matrix.taxon_namespace
-        for i, (taxon, seq) in enumerate(self._orig_matrix.items()):
-            Progress.step(i, self._num_taxa)
-            self._gaps_matrix[taxon] = dp.CharacterDataSequence()
-            for char in seq:
-                if char.symbol is self._orig_matrix.default_state_alphabet.no_data_symbol:
-                    self._gaps_matrix[taxon].append(bin_alphabet.no_data_state) 
-                elif char.is_gap_state:
-                    self._gaps_matrix[taxon].append(bin_alphabet['0'])
-                else: self._gaps_matrix[taxon].append(bin_alphabet['1'])
+        with Progress('Encoding gaps...', self._num_taxa) as prg:
+            self._gaps_matrix = dp.StandardCharacterMatrix(default_state_alphabet=BinaryStateAlphabet(allow_missing=True))
+            bin_alphabet = self._gaps_matrix.default_state_alphabet 
+            self._gaps_matrix.taxon_namespace = self._orig_matrix.taxon_namespace
+            for i, (taxon, seq) in enumerate(self._orig_matrix.items()):
+                prg.step(i)
+                self._gaps_matrix[taxon] = dp.CharacterDataSequence()
+                for char in seq:
+                    if char.symbol is self._orig_matrix.default_state_alphabet.no_data_symbol:
+                        self._gaps_matrix[taxon].append(bin_alphabet.no_data_state) 
+                    elif char.is_gap_state:
+                        self._gaps_matrix[taxon].append(bin_alphabet['0'])
+                    else: self._gaps_matrix[taxon].append(bin_alphabet['1'])
         #if only variable columns are needed, pick them
         if self._variable_only:
             var_indices = []
-            Progress.start('\nSelecting variable sites...')
-            taxons = list(self._gaps_matrix.values())
-            first_t = taxons[0]
-            taxons = taxons[1:]
-            for c in xrange(self._alignment_len):
-                Progress.step(c, self._alignment_len)
-                char = first_t[c]
-                for taxon in taxons:
-                    if char != taxon[c]:
-                        var_indices.append(c)
-                        break
+            with Progress('\nSelecting variable sites...', self._alignment_len) as prg:
+                taxons = list(self._gaps_matrix.values())
+                first_t = taxons[0]
+                taxons = taxons[1:]
+                for c in xrange(self._alignment_len):
+                    prg.step(c)
+                    char = first_t[c]
+                    for taxon in taxons:
+                        if char != taxon[c]:
+                            var_indices.append(c)
+                            break
             if var_indices:
-                Progress.start('\nRemoving non-variable sites...')
-                for i, sec in enumerate(self._gaps_matrix.values()):
-                    Progress.step(i, self._num_taxa)
-                    for idx in range(len(sec)-1, -1, -1):
-                        if idx not in var_indices:
-                            del(sec[idx])
+                with Progress('\nRemoving non-variable sites...', self._num_taxa) as prg:
+                    for i, sec in enumerate(self._gaps_matrix.values()):
+                        prg.step(i)
+                        for idx in range(len(sec)-1, -1, -1):
+                            if idx not in var_indices:
+                                del(sec[idx])
                 self._gaps_len = len(self._gaps_matrix.values().next()) if self._gaps_matrix else 0
                 num_subsets = len(self._orig_matrix.character_subsets)
                 if num_subsets: 
-                    Progress.start('\nReindexing subsets of sites...')
-                    for i, s_label in enumerate(self._orig_matrix.character_subsets):
-                        Progress.step(i, num_subsets)
-                        orig_subset = self._orig_matrix.character_subsets[s_label]
-                        new_subset_indices = [var_indices.index(i) for i in orig_subset.character_indices 
-                                              if i in var_indices] 
-                        self._gaps_matrix.add_character_subset(CharacterSubset(label='gaps'+s_label, 
-                                                                               character_indices=new_subset_indices))
+                    with Progress('\nReindexing subsets of sites...', num_subsets) as prg:
+                        for i, s_label in enumerate(self._orig_matrix.character_subsets):
+                            prg.step(i)
+                            orig_subset = self._orig_matrix.character_subsets[s_label]
+                            new_subset_indices = [var_indices.index(i) for i in orig_subset.character_indices 
+                                                  if i in var_indices] 
+                            self._gaps_matrix.add_character_subset(CharacterSubset(label='gaps'+s_label, 
+                                                                                   character_indices=new_subset_indices))
             else: self._gaps_matrix = None
         print
     #end def
@@ -233,44 +233,44 @@ class GapEncoder(object):
             #add comment for mrbayes
             begin_sets = False
             charsets   = []
-            Progress.start('Processing data...')
-            for i, line in enumerate(nexus_lines):
-                Progress.step(i, num_lines)
-                words = line.split()
-                if not words: continue
-                if  self._for_mrbayes and self._gaps_matrix \
-                and words[0].upper() == 'FORMAT':
-                    new_line  = '    FORMAT '
-                    new_line += ('DATATYPE=mixed(Restriction:1-%d,%s:%d-%d) '
-                                 % (self._gaps_len, self._datatype,
-                                    self._gaps_len+1,
-                                    self._gaps_len+self._alignment_len))
-                    new_line += ('MISSING=%s ' 
-                                 % str(self._orig_matrix.default_state_alphabet.no_data_symbol))
-                    new_line += ('GAP=%s;\n' 
-                                 % str(self._orig_matrix.default_state_alphabet.gap_symbol))
-                    nexus_lines[i] = new_line
-                elif words[0].upper() == 'BEGIN' \
-                and  words[1].upper() == 'SETS;':
-                    if self._for_mrbayes: 
-                        nexus_lines[i] = 'BEGIN MRBAYES;\n'
-                    begin_sets = True
-                    charsets   = []
-                elif begin_sets:
-                    if words[0].upper() == 'CHARSET':
-                        charsets.append(words[1])
-                    elif words[0].upper() == 'END;' and charsets:
-                        new_line = ''
-                        if self._for_mrbayes:
-                            new_line += '    partition parts = %d: %s;\n' % (len(charsets), 
-                                                                            ', '.join(charsets))
-                            new_line += '    set partition = parts;\n\n'
-                            new_line += '    [other mrbayes commands]\n\n'
-                        else:
-                            new_line  = '    charpartition parts = %s;\n' % (', '.join([s+':'+s for s in charsets]))
-                        new_line += 'END;\n'
+            with Progress('Processing data...', num_lines) as prg:
+                for i, line in enumerate(nexus_lines):
+                    prg.step(i)
+                    words = line.split()
+                    if not words: continue
+                    if  self._for_mrbayes and self._gaps_matrix \
+                    and words[0].upper() == 'FORMAT':
+                        new_line  = '    FORMAT '
+                        new_line += ('DATATYPE=mixed(Restriction:1-%d,%s:%d-%d) '
+                                     % (self._gaps_len, self._datatype,
+                                        self._gaps_len+1,
+                                        self._gaps_len+self._alignment_len))
+                        new_line += ('MISSING=%s ' 
+                                     % str(self._orig_matrix.default_state_alphabet.no_data_symbol))
+                        new_line += ('GAP=%s;\n' 
+                                     % str(self._orig_matrix.default_state_alphabet.gap_symbol))
                         nexus_lines[i] = new_line
-                        begin_sets = False
+                    elif words[0].upper() == 'BEGIN' \
+                    and  words[1].upper() == 'SETS;':
+                        if self._for_mrbayes: 
+                            nexus_lines[i] = 'BEGIN MRBAYES;\n'
+                        begin_sets = True
+                        charsets   = []
+                    elif begin_sets:
+                        if words[0].upper() == 'CHARSET':
+                            charsets.append(words[1])
+                        elif words[0].upper() == 'END;' and charsets:
+                            new_line = ''
+                            if self._for_mrbayes:
+                                new_line += '    partition parts = %d: %s;\n' % (len(charsets), 
+                                                                                ', '.join(charsets))
+                                new_line += '    set partition = parts;\n\n'
+                                new_line += '    [other mrbayes commands]\n\n'
+                            else:
+                                new_line  = '    charpartition parts = %s;\n' % (', '.join([s+':'+s for s in charsets]))
+                            new_line += 'END;\n'
+                            nexus_lines[i] = new_line
+                            begin_sets = False
             out_file.writelines(nexus_lines)
         print
     #end def

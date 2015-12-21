@@ -21,8 +21,9 @@ Created on Dec 11, 2015
 @author: Allis Tauri <allista@gmail.com>
 '''
 
-import os, re, tempfile
-from BioUtils.CommonTools import isatty
+import os, re
+from BioUtils.CommonTools import isatty, load_files
+from BioUtils.Blast import LocalBlast
 
 from reportlab.lib import colors
 from reportlab.lib.units import cm
@@ -30,17 +31,17 @@ from Bio.Graphics import GenomeDiagram
 from Bio.Graphics.GenomeDiagram import CrossLink
 from Bio import SeqIO
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from Bio.SeqRecord import SeqRecord
-from Bio.Blast.Applications import NcbiblastnCommandline
-from Bio.Blast import NCBIXML
 from Bio.Alphabet import IUPAC, NucleotideAlphabet, ProteinAlphabet
 
-class ClusterProject(object):
+from DegenPrimer.MultiprocessingBase import MultiprocessingBase
+
+class ClusterProject(MultiprocessingBase):
     
-    def __init__(self, proj, dirname):
-        self.proj = proj
+    def __init__(self, project, dirname, abort_event):
+        super(ClusterProject, self).__init__(abort_event)
+        self.proj = project
         self.dirname = dirname
-        self.savefile = os.path.join(self.dirname, proj+'.gb')
+        self.savefile = os.path.join(self.dirname, project+'.gb')
         self.genomes_files = []
         self.clusters = {}
         self.diagram = None
@@ -48,7 +49,6 @@ class ClusterProject(object):
         self.genes = {}
         self.colors = {}
         self.crosslinks = {}
-        
         try: os.mkdir(self.dirname)
         except: pass
         
@@ -78,29 +78,19 @@ class ClusterProject(object):
     def _extract_clusters(self, tag, qual='ugene_name'):
         tagre = re.compile(tag)
         clusters = {}
-        for filename in self.genomes_files:
-            if not os.path.isfile(filename):
-                print 'No such file: %s' % filename
-                continue
-            try:
-                records = SeqIO.parse(filename, 'gb')
-                for record in records:
-                    for f in record.features:
-                        if qual in f.qualifiers:
-                            q = ' '.join(f.qualifiers[qual])
-                            if not tagre.match(q): continue
-                            c = f.extract(record)
-                            c.id = c.name = q
-                            c.description = record.description
-                            if c.seq.alphabet is not NucleotideAlphabet \
-                            or c.seq.alphabet is not ProteinAlphabet:
-                                c.seq.alphabet = IUPAC.IUPACAmbiguousDNA()
-                            self._process_features(c)
-                            clusters[c.id] = c
-            except Exception, e:
-                print 'Unable to parse %s' % filename
-                print e.message
-                continue
+        for record in load_files(self._abort_event, self.genomes_files, 'gb'):
+            for f in record.features:
+                if qual in f.qualifiers:
+                    q = ' '.join(f.qualifiers[qual])
+                    if not tagre.match(q): continue
+                    c = f.extract(record)
+                    c.id = c.name = q
+                    c.description = record.description
+                    if c.seq.alphabet is not NucleotideAlphabet \
+                    or c.seq.alphabet is not ProteinAlphabet:
+                        c.seq.alphabet = IUPAC.IUPACAmbiguousDNA()
+                    self._process_features(c)
+                    clusters[c.id] = c
         return clusters
     
     def _extract_and_save(self, tag, qual='ugene_name', redo = False):
@@ -124,44 +114,6 @@ class ClusterProject(object):
                 return None
         return clusters
     
-    def _mktmp_fasta(self, rec):
-        fd, fn = tempfile.mkstemp('.fas', 'wb')
-        f = os.fdopen(fd, 'wb')
-        SeqIO.write(rec, f, 'fasta')
-        f.close()
-        return fn
-    
-    def _identity_percent(self, rec1, rec2, evalue, max_rlen):
-        f1n = self._mktmp_fasta(rec1)
-        f2n = self._mktmp_fasta(rec2)
-        f, bout = tempfile.mkstemp('.xml')
-        os.close(f)
-        try:
-            cmd = NcbiblastnCommandline(query=f1n, subject=f2n, 
-                                        task='blastn', evalue=evalue,
-                                        outfmt=5, out=bout)
-            out, err = cmd()
-            if err:
-                print 'Error while performing local blast:'
-                print cmd
-                print out
-                print err
-                return None
-            with open(bout) as inp:
-                results = list(NCBIXML.parse(inp))
-            hsps = []
-            qlen = len(rec1)
-            for r in results:
-                for alignment in r.alignments:
-                    hsps += [hsp for hsp in alignment.hsps 
-                             if float(len(hsp.query))/qlen >= max_rlen]
-            return hsps
-        finally:
-            os.unlink(f1n)
-            os.unlink(f2n)
-            os.unlink(bout)
-        return None
-    
     def _get_feature(self, cid, fid):
         if cid not in self.clusters: return None
         c = self.clusters[cid]
@@ -169,7 +121,30 @@ class ClusterProject(object):
             if self._fidq in f.qualifiers \
             and f.qualifiers[self._fidq][0] == str(fid):
                 return f
-            
+    
+    @MultiprocessingBase.data_mapper_method
+    def _blast_feature(self, f, c1, c2, features1, features2, evalue, max_rlen):
+        hsps = LocalBlast.r2r_blast(f.extract(c1), c2, evalue, max_rlen, command='blastn', task='blastn')
+        if not hsps: return [(None, None, None)]
+        f1 = []
+        f2 = []
+        col = []
+        for hsp in hsps:
+            col.append(colors.linearlyInterpolatedColor(colors.Color(1,1,1,0.2), colors.Color(0,0,0,0.2), 
+                                                        0, 1, float(hsp.identities)/hsp.align_length))
+            f1.append(SeqFeature(FeatureLocation(f.location.start+hsp.query_start, 
+                                                 f.location.start+hsp.query_start+hsp.align_length, strand=0)))
+            f2.append(SeqFeature(FeatureLocation(hsp.sbjct_start, hsp.sbjct_start+hsp.align_length, strand=0)))
+        return zip(f1, f2, col)
+    
+    @MultiprocessingBase.results_assembler_methd
+    def _compose_crosslink(self, index, result, features1, features2):
+        for f1, f2, col in result:
+            if f1 is None: continue
+            tf1 = features1.add_feature(f1, color=col, border=col)
+            tf2 = features2.add_feature(f2, color=col, border=col)
+            self.diagram.cross_track_links.append(CrossLink(tf1, tf2, col, col))
+    
     def _compose_crosslinks(self, cluster_ids, evalue, max_rlen):
         if not self.diagram or not self.fsets: return
         print 'Finding crosslinks between genes in the cluster.'
@@ -182,22 +157,14 @@ class ClusterProject(object):
             features2 = self.fsets[cid2]
             c2 = self.clusters[cid2]
             print '%s vs %s' % (cid1, cid2)
-            for f in c1.features:
-                if f.type != 'CDS': continue
-                hsps = self._identity_percent(f.extract(c1), c2, evalue, max_rlen)
-                if not hsps: continue
-                for hsp in hsps:
-                    hspl = len(hsp.sbjct)
-                    col = colors.linearlyInterpolatedColor(colors.Color(1,1,1,0.2), colors.Color(0,0,0,0.2), 
-                                                           0, 1, float(hsp.identities)/hspl)
-                    tf1 = features1.add_feature(SeqFeature(FeatureLocation(f.location.start+hsp.query_start, 
-                                                                           f.location.start+hsp.query_start+hspl, strand=0)),
-                                                color=col, border=col)
-                    tf2 = features2.add_feature(SeqFeature(FeatureLocation(hsp.sbjct_start, hsp.sbjct_start+hspl, strand=0)),
-                                                color=col, border=col)
-                    self.diagram.cross_track_links.append(CrossLink(tf1, tf2, col, col))
+            work = self.Work()
+            work.prepare_jobs(self._blast_feature, 
+                              [f for f in c1.features if f.type == 'CDS'], None, 
+                              c1, c2, features1, features2, evalue, max_rlen)
+            work.set_assembler(self._compose_crosslink, features1, features2)
+            self.start_work(work)
+            self.wait(work)
             
-    
     def get_clusters(self, genomes_dir, tag, force = False, print_ids = False):
         print 'Extracting clusters from provided GenBank files.'
         self.genomes_files = [os.path.join(genomes_dir, f) 
@@ -207,7 +174,7 @@ class ClusterProject(object):
         if print_ids: print self.clusters.keys()
         return True
         
-    def draw_clusters(self, cluster_ids=None, evalue=0.0001, max_rlen=0.01, border=True, pagesize='A4'):
+    def draw_clusters(self, cluster_ids=None, evalue=0.0001, max_rlen=0.01, border=True, pagesize='A4', add_crosslinks=True):
         print 'Creating cluster diagram.'
         #create diagram
         self.diagram = GenomeDiagram.Diagram(self.proj)
@@ -228,7 +195,8 @@ class ClusterProject(object):
                                       start=0, end=clen)
             self.fsets[cid] = track.new_set()
         #add crosslink features
-        self._compose_crosslinks(cluster_ids, evalue, max_rlen)
+        if add_crosslinks:
+            self._compose_crosslinks(cluster_ids, evalue, max_rlen)
         #add CDS-es
         for cid in cluster_ids:
             cluster = self.clusters[cid]
@@ -255,9 +223,9 @@ class ClusterProject(object):
 
 def grey(val): return colors.Color(val, val, val)
 
-def FC_cluster(color = True):
-    proj = ClusterProject('Formate Clusters', u'/home/allis/Dropbox/Science/Микра/Thermococcus/Figures/FC')
-    if not proj.get_clusters(genomes_dir, '.+\-FC\-full', force=False): return
+def FC_cluster(abort_event, color = True, force = False, print_ids = False, add_crosslinks=True):
+    proj = ClusterProject('Formate Clusters', u'/home/allis/Dropbox/Science/Микра/Thermococcus/Figures/FC', abort_event)
+    if not proj.get_clusters(genomes_dir, '.+\-FC\-full', force=force, print_ids=print_ids): return
     
     #formate cluster specifics
     other_genes = ('fdhA', '4Fe-4S', 
@@ -292,9 +260,9 @@ def FC_cluster(color = True):
     cluster_ids = ('TBCH5-FC-full',
                    'TONA1-FC-full',
                    'TGAM-FC-full',
-#                   'TES1-FC-full',
-#                   'TBDT4-FC-full',
-#                   'THDS1-FC-full',
+                   'TES1-FC-full',
+                   'TBDT4-FC-full',
+                   'THDS1-FC-full',
                    )
     
     for cid in cluster_ids:
@@ -305,15 +273,15 @@ def FC_cluster(color = True):
             proj.genes[cid] = other_genes
             proj.colors[cid] = other_colors
     
-    proj.draw_clusters(cluster_ids)
+    proj.draw_clusters(cluster_ids, add_crosslinks=add_crosslinks)
 #end
 
-def CO_cluster(color = True):
-    proj = ClusterProject('CO Clusters', u'/home/allis/Dropbox/Science/Микра/Thermococcus/Figures/CO')
-    if not proj.get_clusters(genomes_dir, '.+\-COC\-full', force=False, print_ids=False): return
+def CO_cluster(abort_event, color = True, force = False, print_ids = False, add_crosslinks=True):
+    proj = ClusterProject('CO Clusters', u'/home/allis/Dropbox/Science/Микра/Thermococcus/Figures/CO', abort_event)
+    if not proj.get_clusters(genomes_dir, '.+\-COC\-full', force=force, print_ids=print_ids): return
     
     #CO cluster specifics
-    other_genes = ('cooRa', 'cooF', 'cooS', 'cooC',
+    other_genes = ('corQ', 'corR', 'cooF', 'cooS', 'cooC',
                    'unknown',
                    'mbhH', 'mbhM', 'mbh K+L', 'mbhN', 'mbhJ',
                    'mbhB', 'mbhC', 'mbhD', 'mbh E+F', 'mbhG', 'mbhA', 'mbhH\'\'\'')
@@ -321,7 +289,7 @@ def CO_cluster(color = True):
     AM4_genes = list(other_genes)
     AM4_genes.insert(5, 'unknown')
     
-    if color:
+    if color: #TODO: change colors for CO cluster
         other_colors = [colors.Color(1,69.0/255)]*2 + \
                      [colors.red]*6 + \
                      [colors.Color(1,185.0/255), colors.darkgreen, colors.darkmagenta] + \
@@ -332,7 +300,7 @@ def CO_cluster(color = True):
                      
         
     else:
-        other_colors = [grey(0.2)] + \
+        other_colors = [grey(0.2)]*2 + \
                      [grey(0.3)]*3 + \
                      [grey(0.1)]+ \
                      [grey(0.5)]*5 + \
@@ -356,11 +324,13 @@ def CO_cluster(color = True):
             proj.genes[cid] = other_genes
             proj.colors[cid] = other_colors
     
-    proj.draw_clusters(cluster_ids)
+    proj.draw_clusters(cluster_ids, add_crosslinks=add_crosslinks)
 #end
 
 if __name__ == '__main__':
+    from multiprocessing import Event
+    abort_event = Event()
     genomes_dir = u'/home/allis/Dropbox/Science/Микра/Thermococcus/sequence/GenBank/Thermococcus'
-    FC_cluster(False)
-    CO_cluster(False)
+    FC_cluster(abort_event, color=False, force=False, add_crosslinks=True)
+#    CO_cluster(color=False, force=False, add_crosslinks=False)
     print 'Done'

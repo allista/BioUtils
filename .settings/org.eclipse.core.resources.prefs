@@ -1,7 +1,9 @@
 eclipse.preferences.version=1
+encoding//BioUtils/Blast.py=utf-8
 encoding/alien2gb=utf-8
 encoding/analyze_ec=utf-8
 encoding/draw_clusters.py=utf-8
+encoding/g2g_blastp.py=utf-8
 encoding/gaps_encoder=utf-8
 encoding/gbfix=utf-8
 encoding/parse_chrom=utf-8
