@@ -36,8 +36,8 @@ from Bio import Entrez
 from Bio.SearchIO.HmmerIO import Hmmer3TextParser
 from Bio.SeqFeature import SeqFeature, FeatureLocation
 
-from DegenPrimer.MultiprocessingBase import MultiprocessingBase, cpu_count
-from DegenPrimer.tmpStorage import shelf_result, roDict
+from BioUtils.Tools.Multiprocessing import MultiprocessingBase, cpu_count
+from BioUtils.Tools.tmpStorage import shelf_result, roDict
 
 from BioUtils.Tools import user_message, Progress, ProgressCounter, retry, mktmp_name
 from BioUtils.SeqUtils import mktmp_fasta, cat_records, Translator, get_indexes_of_genes
@@ -133,7 +133,7 @@ from time import sleep
 from BioUtils.NCBI import BlastCLI
 from reportlab.lib import colors
 
-from DegenPrimer.tmpStorage import roDict, clean_tmp_files, shelf_result
+from BioUtils.Tools.tmpStorage import roDict, clean_tmp_files, shelf_result
 
 _pid = -1
 abort_event = None

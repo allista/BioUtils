@@ -40,7 +40,7 @@ from reportlab.lib import colors
 import dendropy as dp
 from xml.dom import minidom
 
-from DegenPrimer.MultiprocessingBase import MultiprocessingBase, cpu_count
+from BioUtils.Tools.Multiprocessing import MultiprocessingBase, cpu_count
 from BioUtils.Tools import user_message, isatty, mktmp_name, MPMain, safe_unlink, ProgressCounter
 from BioUtils.NCBI import BlastCLI, BlastWWW
 from BioUtils.NCBI.Applications import FormatDBCommandline

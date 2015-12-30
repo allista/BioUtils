@@ -28,8 +28,8 @@ from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
 
-from DegenPrimer.MultiprocessingBase import MultiprocessingBase
-from DegenPrimer.tmpStorage import shelf_result, roDict, cleanup_file
+from BioUtils.Tools.Multiprocessing import MultiprocessingBase
+from BioUtils.Tools.tmpStorage import shelf_result, roDict, cleanup_file
 
 re_type = type(re.compile(''))
 isatty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()

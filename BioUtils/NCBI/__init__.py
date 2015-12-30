@@ -34,8 +34,8 @@ from Bio.Alphabet import IUPAC
 from Bio.Blast import NCBIWWW, NCBIXML, Applications
 from Bio import Entrez
 
-from DegenPrimer.MultiprocessingBase import MultiprocessingBase
-from DegenPrimer.tmpStorage import shelf_result, roDict
+from BioUtils.Tools.Multiprocessing import MultiprocessingBase
+from BioUtils.Tools.tmpStorage import shelf_result, roDict
 
 from BioUtils.Tools import user_message, Progress, ProgressCounter, retry
 from BioUtils.SeqUtils import mktmp_fasta, cat_records, Translator

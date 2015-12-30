@@ -34,7 +34,7 @@ from Bio import SeqIO
 from Bio.SeqFeature import SeqFeature, FeatureLocation
 from Bio.Alphabet import IUPAC, NucleotideAlphabet, ProteinAlphabet
 
-from DegenPrimer.MultiprocessingBase import MultiprocessingBase
+from BioUtils.Tools.Multiprocessing import MultiprocessingBase
 
 class ClusterProject(MultiprocessingBase):
     
@@ -125,7 +125,7 @@ class ClusterProject(MultiprocessingBase):
     
     @MultiprocessingBase.data_mapper_method
     def _blast_feature(self, f, c1, c2, features1, features2, evalue, max_rlen):
-        results = BlastCLI.s2s_blast(f.extract(c1), c2, evalue, max_rlen, command='blastn', task='blastn')
+        results = BlastCLI.s2s_blast(f.extract(c1), c2, evalue, command='blastn', task='blastn')
         hsps = BlastCLI.all_hsps(results, max_rlen)
         if not hsps: return [(None, None, None)]
         f1 = []

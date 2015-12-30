@@ -28,7 +28,7 @@ from time import sleep
 from BioUtils.NCBI import BlastCLI
 from reportlab.lib import colors
 
-from DegenPrimer.tmpStorage import roDict, clean_tmp_files, shelf_result
+from BioUtils.Tools.tmpStorage import roDict, clean_tmp_files, shelf_result
 
 _pid = -1
 abort_event = None
