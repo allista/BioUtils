@@ -439,6 +439,12 @@ class EC_Analyzer(MultiprocessingBase):
             print e
             print
             return False
+        if os.stat(err).st_size == 0:
+            print 'Removing empty %s' % err 
+            os.unlink(err)
+        if os.stat(out).st_size == 0:
+            print 'Removing empty %s' % err 
+            os.unlink(out)
         return True
     
     @classmethod
