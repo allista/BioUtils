@@ -59,7 +59,7 @@ def user_message(msg, delimiter=' '):
         sys.stdout.flush()
 
 def random_text(length):
-    return ''.join(random.choice(string.ascii_uppercase + string.digits) for _unused in xrange(length))
+    return ''.join(random.choice(string.ascii_letters + string.digits) for _unused in xrange(length))
 
 def mktmp_name(suffix):
     fd, fn = tempfile.mkstemp(suffix, 'wb')
