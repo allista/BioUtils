@@ -21,7 +21,10 @@ Created on Dec 7, 2015
 @author: Allis Tauri <allista@gmail.com>
 '''
 
-import sys, os, time, argparse, re
+import sys, os 
+import time, argparse, re 
+import inspect, tempfile, shutil
+from datetime import datetime
 from collections import OrderedDict
 
 from Bio.KEGG import REST
@@ -30,13 +33,20 @@ from Bio.Alphabet import IUPAC
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio import SeqIO
+from Bio.SearchIO.HmmerIO.hmmer3_text import Hmmer3TextParser 
 from Bio.Align.Applications import MuscleCommandline, MafftCommandline
 from Bio.Phylo.Applications import FastTreeCommandline, RaxmlCommandline
 from reportlab.lib import colors
 import dendropy as dp
 from xml.dom import minidom
 
-from BioUtils.CommonTools import user_message, isatty, ncpu
+from DegenPrimer.MultiprocessingBase import MultiprocessingBase, cpu_count
+from BioUtils.Tools import user_message, isatty, mktmp_name, MPMain, safe_unlink, ProgressCounter
+from BioUtils.NCBI import BlastCLI, BlastWWW
+from BioUtils.NCBI.Applications import FormatDBCommandline
+from BioUtils.HMMER3.Applications import HMMBuildCommandline, HMMSearchCommandline
+from BioUtils.HMMER3 import BatchHmmer
+from BioUtils.SeqUtils import SeqLoader, num_fasta_records, unique_records, mktmp_fasta, safe_parse, safe_write
 
 RETRIES = 3
 PAUSE = 5
@@ -58,9 +68,10 @@ def KEGG_cmd(cmd, args, outfile, emsg, force=False):
 
 class kgene(object):
     '''Represents KEGG's gene database entry in the form organism:gen_id'''
-    def __init__(self, org, gid):
+    def __init__(self, org, gid, desc=''):
         self.org = org
         self.id  = gid
+        self.description = desc
         self.request = "%s:%s" % (self.org, self.id) 
         self.filename = "%s-%s.kegg" % (self.org, self.id) 
     
@@ -70,12 +81,24 @@ class kgene(object):
 class Lineage(tuple):
     '''Handles lineage information'''
     
+    _prokaryotes = ('archaea', 'bacteria')
+    known_taxons = set(_prokaryotes)
+    
+    @classmethod
+    def _register(cls, lineage):
+        for t in lineage:
+            cls.known_taxons.add(t)
+    
     def __new__(cls, line, delimiter=';'):
         line = line.strip('\n\r')
-        return  tuple.__new__(cls, line.split(delimiter))
+        taxons = [t.lower() for t in line.split(delimiter)]
+        if taxons and taxons[0] in cls._prokaryotes:
+            taxons.insert(0, 'prokaryotes')
+        return tuple.__new__(cls, taxons)
     
     def __init__(self, line, delimiter=';'):
-        self.str = ':'.join(self).lower()
+        self.str = ':'.join(self)
+        self._register(self)
         
     def __str__(self): return self.str
     
@@ -87,11 +110,15 @@ class Lineage(tuple):
     
     @property
     def last(self):
-        if not self: return None
-        return self[len(self)-1]
+        return self[-1] if self else None
     
     def includes(self, other):
         return other.str.startswith(self.str)
+    
+    @classmethod
+    def from_iter(cls, taxons):
+        if not taxons: return cls('')
+        return cls(';'.join(taxons))
     
     @classmethod
     def common(cls, lineages, delimiter=':'):
@@ -118,11 +145,19 @@ class Lineage(tuple):
         return cls(';'.join(common))
     
     @classmethod
-    def allsame(cls, lineages):
+    def sameall(cls, lineages):
         if not lineages: return False
         l0 = lineages[0]
         for l in lineages[1:]:
             if l0 != l: return False
+        return True
+    
+    @classmethod
+    def samelast(cls, lineages):
+        if not lineages: return False
+        l0 = lineages[0].last
+        for l in lineages[1:]:
+            if l0 != l.last: return False
         return True
 #end class
 
@@ -149,6 +184,23 @@ class Organism(object):
         
     def belongs2(self, lineage):
         return lineage.includes(self.lineage)
+    
+    def fix_lineage(self):
+        genus = self.description.split()[0].lower()
+        if genus in Lineage.known_taxons:
+            if genus not in self.lineage: 
+                self.lineage = Lineage.from_iter(list(self.lineage)+[genus])
+            else:
+                self.lineage = Lineage.from_iter(self.lineage[:self.lineage.index(genus)+1])
+    
+    @classmethod
+    def from_record(cls, rec):
+        org = cls()
+        org.T = rec.id
+        org.org = rec.id
+        org.description = rec.annotations.get('organism', rec.name)
+        org.lineage = Lineage.from_iter(rec.annotations.get('taxonomy'))
+        return org
 #end class
 
 class Organisms(dict):
@@ -159,7 +211,7 @@ class Organisms(dict):
         
     def parse(self, filename):
         if not filename or not os.path.isfile(filename): return False
-        print 'Parsing the list of organisms...'
+        print 'Parsing the list of organisms.'
         with open(filename) as inp:
             for line in inp:
                 try: org = Organism(line)
@@ -170,6 +222,10 @@ class Organisms(dict):
                 self[org.org] = org
                 if org.description: self[org.description] = org
         return True
+    
+    def fix_lineages(self):
+        for org in self.values():
+            org.fix_lineage()
 #end class
 
 class KEGGRecord(dict):
@@ -207,54 +263,197 @@ class KEGGRecord(dict):
                 field.append(data)
 #end class
 
-class EC_Analyzer(object):
+class PipelineNode(object):
+    def __init__(self, func):
+        self.outfile  = None
+        self.inputs   = []
+        self.required = []
+        self.msg      = 'run %s' % func.__name__
+        self.func     = func
+        self.instance = None
+        self.iclass   = None
+        self.always_run = False
+        self.argspec = inspect.getargspec(func)
+        if self.argspec.keywords:
+            print 'Warning: %s uses %s keywords argument. '
+        
+    def nargs(self):
+        nargs = len(self.argspec.args)
+        if self.outfile: nargs -= 1
+        if self.instance or self.iclass: nargs -= 1
+        return nargs
+        
+    @classmethod
+    def new(cls, required=[], inputs=[], msg=None, always_run=False):
+        def factory(func):
+            node = cls(func)
+            node.inputs.extend(inputs)
+            node.required.extend(required)
+            node.always_run = always_run
+            if msg: node.msg = msg
+            return node
+        return factory
+    
+    def copy(self):
+        node = PipelineNode(self.func)
+        node.msg = self.msg
+        node.instance = self.instance
+        node.iclass = self.iclass
+        node.argspec = self.argspec
+        node.always_run = self.always_run
+        return node
+    
+    def plug(self, other):
+        self.inputs.append(other)
+        
+    def unplug(self, other):
+        try: self.inputs.remove(other)
+        except: pass
+        
+    def replug(self, old, new):
+        self.unplug(old)
+        self.plug(new)
+    
+    @staticmethod
+    def _isfile(filename):
+        return (filename and 
+                os.path.isfile(filename) and
+                os.stat(filename).st_size > 0)
+    
+    @classmethod
+    def _file_exists(cls, filename, msg):
+        if cls._isfile(filename):
+            print '\n%s exists and is up to date.' % filename
+            if isatty:
+                inp = raw_input('Are you sure you want to %s again? [y/n]: ' % msg)
+                if inp.lower() != 'y': return True
+            else:
+                print 'To %s again, remove/rename the "%s" file.' % (msg, filename)
+                return True
+        return False
+        
+    def __get__(self, instance, owner):
+        self.instance = instance
+        self.iclass = owner
+        return self
+    
+    def __call__(self, *inputs):
+        inputs = self.inputs+list(inputs)
+        nargs = self.nargs()
+        if self.argspec.varargs: 
+            if len(inputs) <= nargs:
+                raise RuntimeError('PipelineNode %s needs at least %d input nodes, has %d' %
+                                   (self.func.__name__, nargs+1, len(inputs)))
+        elif len(inputs) != nargs:
+            raise RuntimeError('PipelineNode %s needs exactly %d input nodes, has %d' %
+                               (self.func.__name__, nargs, len(inputs)))
+        args = [p.outfile for p in inputs]
+        if args and self.outfile:
+            print '\n'+', '.join(args)+' -> '+self.outfile
+        if self.outfile: args = [self.outfile] + args
+        force_run = False
+        for inp in inputs:
+            if self._isfile(inp.outfile):
+                if self._isfile(self.outfile) \
+                and os.stat(inp.outfile).st_mtime > os.stat(self.outfile).st_mtime:
+                    force_run = True
+            else:
+                print '\nNo "%s" file found.' % inp.outfile
+                if not inp(): return False
+                force_run = True
+        if not self.always_run and not force_run \
+        and self._file_exists(self.outfile, self.msg): return True
+        for r in self.required: r()
+        if not self.func.__get__(self.instance, self.iclass)(*args):
+            safe_unlink(self.outfile)
+            return False
+        return True
+#end class
+  
+
+class EC_Analyzer(MultiprocessingBase):
 
     organisms = Organisms()
     orgfile   = 'organisms.kegg'
     aligners  = ('mafft', 'muscle')
     
-    def __init__(self, project, ec, subproject='', lineage='', gene_filter=None):
-        self.proj = project
-        self.ec = ec
-        self.subp = subproject
-        self.lineage = Lineage(lineage)
+    def __init__(self, abort_event, project, EC, **kwargs):
+        super(EC_Analyzer, self).__init__(abort_event)
+        self.proj  = project
+        self.ec    = EC
+        self.email = kwargs.pop('email', None)
+        self.subp  = kwargs.pop('subproject', '')
+        self.force = kwargs.pop('force', False)
+        self.aligner = kwargs.pop('align_with', None)
+        self.psi_evalue = float(kwargs.pop('psi_evalue', 1e-10))
+        self.hmm_evalue = float(kwargs.pop('hmm_filter', -1))
+        self.hom_filter = float(kwargs.pop('homologs_filter', -1))/100.0
+        self.max_targets = int(kwargs.pop('max_targets', 1000))
+        self.lineage = Lineage(kwargs.pop('lineage', ''))
+        self.add_dirs = kwargs.pop('add_dirs', None)
+        self.add_files = kwargs.pop('add_files', None)
+        gfilter = kwargs.pop('filter', None)
+        self.gene_filter = re.compile(gfilter) if isinstance(gfilter, str) else None
+        
+        self.alignment = OrderedDict()
         self.genes = None
-        self.alignment = None
         self.tree = None
-        self.gene_filter = re.compile(gene_filter) if isinstance(gene_filter, str) else None
 
         self.namebase = '%s-EC_%s' % (self.proj, self.ec)
-        self.recfile   = self.namebase+'.kegg'
-        self.genesdir  = self.namebase+'-GENES'
-        if self.subp: self.namebase += '_%s' % self.subp
-        self.ialnfile  = self.namebase+'-ialn.faa'
-        self.oalnfile  = self.namebase+'-aln.faa'
-        self.treefile  = self.namebase+'-aln.tre'
-        self.otreefile = self.namebase+'-aln.out.tre'
-        self.xtreefile = self.namebase+'-aln.out.nexml'
-        self.dtreefile = self.namebase+'-aln.out.dot'
+        self.genesdir = self.namebase+'-GENES'
+        self._fetch_ec_record.outfile = self.namebase+'.kegg'
         
-    @classmethod
-    def get_organisms(cls, force = False):
-        if not force and len(cls.organisms) > 0: return True
-        print 'Fetching the list of organisms...'
-        if not KEGG_cmd(REST.kegg_list, 'organism', 
-                    cls.orgfile, 'Unable to get the list of KEGG organisms', force=force):
+        if self.subp: self.namebase += '_%s' % self.subp
+        self._fetch_genes.outfile = self.namebase+'-seqs.faa'
+        self.align_data.outfile = self.namebase+'-aln.faa'
+        self.hmmbuild_data.outfile = self.namebase+'.hmm'
+        self._get_local_data.outfile = self.namebase+'-local.gb'
+        self._psiblast_data.outfile = self.namebase+'-psi.xml'
+        self._fetch_psiblast_data.outfile = self.namebase+'-psi.gb'
+        self._filter_unique_date.outfile = self.namebase+'-filtered.unique.gb'
+        self._hmm_filter_data.outfile = self.namebase+'-filtered.hmm.gb'
+        self._hom_filter_data.outfile = self.namebase+'-filtered.hom.gb'
+        self._merge_additional_data.outfile = self.namebase+'-seqs.merged.faa'
+        self.malnfile = self.namebase+'-seqs.merged.aln.faa'
+        self.build_tree.outfile = self.namebase+'.tre'
+        
+        self.otreefile = self.namebase+'-out.tre'
+        self.xtreefile = self.namebase+'-out.nexml'
+        self.dtreefile = self.namebase+'-out.dot'
+        
+    def run_cline(self, cline, *args, **kwargs):
+        base = '%s-%s-%s' % (self.namebase, 
+                             os.path.basename(cline.program_name), 
+                             datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
+        _raise = kwargs.pop('_raise', False)
+        msg = kwargs.pop('_msg', None)
+        err = kwargs.pop('stderr', base+'.err')
+        out = kwargs.pop('stdout', base+'.out')
+        print cline
+        print 'stderr: %s' % err
+        print 'stdout: %s' % out
+        try: cline(stderr=err, stdout=out, *args, **kwargs)
+        except Exception, e:
+            if _raise: raise e
+            if msg: print msg
+            print e
+            print
             return False
-        cls.organisms = Organisms(cls.orgfile)
         return True
     
     @classmethod
-    def clade_phylogeny(cls, clade):
-        with open(clade) as inp:
-            for line in inp:
-                if not line: continue
-                words = line.split()
-                desc = " ".join(words[1:])
-                org = cls.organisms.get(desc)
-                if org: print org.lineage[1:3], org.description
+    def get_organisms(cls, force = False):
+        if not force and len(cls.organisms) > 0: return True
+        print 'Fetching the list of organisms.'
+        if not KEGG_cmd(REST.kegg_list, 'organism', 
+                        cls.orgfile, 'Unable to get the list of KEGG organisms', force=force):
+            return False
+        cls.organisms = Organisms(cls.orgfile)
+        cls.organisms.fix_lineages()
+        return True
     
-    def get_data(self, force = False):
+    @PipelineNode.new(msg='fetch KEGG record for EC')
+    def _fetch_ec_record(self, refcile):
         print 'Fetching KEGG record for EC: %s'  % self.ec
         #make a directory to store gene files
         try: os.mkdir(self.genesdir)
@@ -263,13 +462,26 @@ class EC_Analyzer(object):
         if not KEGG_cmd(REST.kegg_get, 'ec:'+self.ec, 
                         self.recfile, 'Unable to get record for EC: %s' % self.ec):
             return False
-        #parse the record
-        with user_message('Parsing KEGG record...'):
-            records = Enzyme.parse(open(self.recfile))
-            self.genes = OrderedDict(((g, kgene(gr[0].lower(), g)) for r in records for gr in r.genes for g in gr[1]))
-        #analyze genes
+        return True
+    
+    @PipelineNode.new(inputs=[_fetch_ec_record], msg='parse KEGG record for EC')
+    def _parse_ec_record(self, recfile):
+        if self.genes: return True
+        try:
+            with user_message('Parsing KEGG record...'):
+                records = Enzyme.parse(open(recfile))
+                self.genes = OrderedDict(((g, kgene(gr[0].lower(), g)) 
+                                          for r in records for gr in r.genes for g in gr[1]))
+        except Exception, e:
+            print 'Unable to parse %s' % recfile
+            print e
+            print
+            return False
+        return True
+    
+    @PipelineNode.new(required=[_parse_ec_record], inputs=[_fetch_ec_record], msg='fetch and parse KEGG gene records')
+    def _fetch_genes(self, seqdb, recfile):
         print 'Fetching and parsing gene records...'
-        self.alignment = OrderedDict()
         numgenes = len(self.genes)
         os.chdir(self.genesdir)
         for i, gene in enumerate(self.genes.values()):
@@ -287,13 +499,13 @@ class EC_Analyzer(object):
             if not os.path.isfile(gene.filename):
                 print 'Fetching gene information [%3.0f%%]: %s' % (progress, gene)
                 KEGG_cmd(REST.kegg_get, gene, gene.filename, 
-                         'Unable to get record for gene: %s' % gene, force)
+                         'Unable to get record for gene: %s' % gene, self.force)
             print 'Parsing gene information  [%3.0f%%]: %s' % (progress, gene.id)
             for gr in KEGGRecord.parse(gene.filename):
+                gene.description = gr.get('DEFINITION')
                 if self.gene_filter is not None:
-                    definition = gr.get('DEFINITION')
-                    if not definition \
-                    or not self.gene_filter.search(' '.join(definition)):
+                    if not gene.description \
+                    or not self.gene_filter.search(' '.join(gene.description)):
                         continue
                 plines = gr.get('AASEQ')[1:]
                 if not plines:
@@ -305,87 +517,328 @@ class EC_Analyzer(object):
                     print '%s sequence is the exact same as %s' % (gene.id, self.alignment[shash].id)
                     self.alignment[shash].description += ', '+org.description
                 else: 
-                    self.alignment[shash] = SeqRecord(Seq(sseq, IUPAC.IUPACProtein), gene.id, 
+                    self.alignment[shash] = SeqRecord(Seq(sseq, IUPAC.extended_protein), gene.id, 
                                                  description=org.description)
             print
         #write initial alignment
         os.chdir('..')
-        with open(self.ialnfile, 'w') as out:
-            SeqIO.write(self.alignment.values(), out, 'fasta')
+        with open(seqdb, 'w') as out:
+            if not safe_write(self.alignment.values(), out, 'fasta'): 
+                return False
         print 'Done\n'
-            
-    def _file_exists(self, filename, atty_msg, msg):
-        if os.path.isfile(filename):
-            print 'The %s is already exists.' % filename
-            if isatty:
-                inp = raw_input('%s [y/n]: ' % atty_msg)
-                if inp.lower() != 'y': return True
-            else:
-                print '%s, remove/rename the "%s" file and try again.\n' % (msg, filename)
-                return True
-        return False
+        return True
     
-    def align_data(self, method=None):
-        if not os.path.isfile(self.ialnfile):
-            print 'No input alignment to align.'
+    @PipelineNode.new(inputs=[_fetch_genes], msg='parse KEGG gene records')
+    def _parse_genes(self, seqdb):
+        if self.alignment: return True
+        try:
+            for rec in safe_parse(seqdb, 'fasta', IUPAC.extended_protein):
+                self.alignment[hash(str(rec.seq))] = rec
+        except Exception, e:
+            print 'Unable to parse %s' % seqdb
+            print e
+            print
             return False
-        print 'Aligning amino acid sequences...'
-        if self._file_exists(self.oalnfile, 
-                             'Are you sure you want to re-run the alignment tool?',
-                             'To re-run the alignment tool'):
-            return True
-        print 'This may take quite a while...'
-        if method == 'muscle':
-            cline = MuscleCommandline(input=self.ialnfile, out=self.oalnfile)
-            print cline
-            stdout, stderr = cline()
-            print stdout
+        return True
+    
+    def get_genes(self):
+        return (self._fetch_ec_record() and
+                self._parse_ec_record() and
+                self._fetch_genes() and
+                self._parse_genes())
+    
+    @PipelineNode.new(required=[_parse_genes], inputs=[_fetch_genes], msg='run the alignment tool')
+    def align_data(self, msafile, seqdb):
+        if not self.aligner: return False
+        print 'Aligning amino acid sequences. This may take a while...'
+        if self.aligner == 'muscle':
+            if not self.run_cline(MuscleCommandline(input=seqdb, out=msafile)):
+                return False
         else: #default
-            cline = MafftCommandline(thread=ncpu, auto=True, input=self.ialnfile)
-            stdout, stderr = cline()
-            with open(self.oalnfile, 'wb') as out:
-                out.write(stdout)
-        if stderr: sys.stderr.write(stderr)
-        print 'Done\n'
-        return True
-        
-    def fasttree_alignment(self):
-        if not os.path.isfile(self.oalnfile):
-            print 'No alignment to build a tree with'
-            return False
-        if self._file_exists(self.treefile, 
-                             'Are you sure you want to re-run the fasttree?',
-                             'To re-run the fasttree'):
-            return True
-        print 'Building an approximate-ML tree with fasttree.'
-        cline = FastTreeCommandline(input=self.oalnfile, out=self.treefile, pseudo=1)
-        print cline
-        print 'This may take quite a while...'
-        sys.stdout.flush()
-        try: 
-            stdout, stderr = cline()
-            print stdout
-        except Exception, e: print e
-        if stderr: sys.stderr.write(stderr)        
+            args = dict(thread=cpu_count, input=seqdb)
+            if num_fasta_records(seqdb) < 10000: args['auto'] = True
+            else: 
+#                args['alga'] = True
+                args['parttree'] = True
+                args['partsize'] = 1000
+            if not self.run_cline(MafftCommandline(**args), stdout=msafile):
+                return False
         print 'Done\n'
         return True
     
-    def _set_node_taxonomy(self, node, parent_lineage, collapse_genera, collapse_min_nodes, lineage_colors):
+    @PipelineNode.new(inputs=[align_data], msg='run hmmbuild')
+    def hmmbuild_data(self, hmmfile, msafile):
+        print 'Building HMM profile of aligned sequences...'
+        if not self.run_cline(HMMBuildCommandline(input=msafile, out=hmmfile, 
+                                                  n=self.namebase, 
+                                                  cpu=cpu_count, seed=0),
+                              _msg = 'Unable to build HMM profile'):
+            return False
+        print 'Done\n'
+        return True
+    
+    @PipelineNode.new(inputs=[align_data], msg='perform psi-blast query')
+    def _psiblast_data(self, psifile, msafile):
+        with user_message('Running remote psi-blast query. This will take a wile...', '\n'):
+            BlastCLI.blast('psiblast', evalue=self.psi_evalue,
+                           parse_results=True, save_results_to=psifile, 
+                           in_msa=msafile, max_target_seqs=self.max_targets,
+                           db='nr', remote=True)
+        return True
+    
+    @PipelineNode.new(inputs=[_psiblast_data], msg='fetch records from psi-blast results')
+    def _fetch_psiblast_data(self, psirecords, psifile):
+        with user_message('Parsing psi-blast results...'):
+            from Bio.Blast import NCBIXML
+            with open(psifile) as inp:
+                results = list(NCBIXML.parse(inp))
+        #fetch records from hit ids
+        with user_message('Fetching records from psi-blast results. This will take a wile...', delimiter='\n'):
+            records = BlastWWW.fetch_results(self.email, results, from_dbs=['protein'], what='record')
+        if not records:
+            print 'No records was fetched from psi-blast results.\n'
+            return False
+        if not safe_write(records, psirecords, 'gb'): return False
+        print 'Done\n'
+        return True
+    
+    @PipelineNode.new(msg='remove duplicate sequences')
+    def _filter_unique_date(self, filteredfile, recordsfile):
+        print 'Removing duplicate records from %s' % recordsfile
+        try: SeqIO.write(unique_records(SeqIO.parse(recordsfile, 'gb')), 
+                         filteredfile, 'gb')
+        except Exception, e:
+            print e
+            print
+            return False
+        return True
+        print 'Done\n'
+    
+    @PipelineNode.new(inputs=[hmmbuild_data], 
+                      msg='filter sequences with HMM profile')
+    def _hmm_filter_data(self, filteredfile, hmmfile, recordsfile):
+        #perform hmmsearch query
+        print 'Filtering sequences with HMM profile...'
+        hmm_out = mktmp_name('.hmm.txt')
+        try:
+            records = list(SeqIO.parse(recordsfile, 'gb'))
+            recordsf = mktmp_fasta(records)
+            self.run_cline(HMMSearchCommandline(hmmfile=hmmfile, seqdb=recordsf,
+                                                o=hmm_out, cpu=cpu_count, seed=0),
+                           _raise=True)
+            #parse hmmsearch results
+            ids = set()
+            with open(hmm_out) as inp:
+                parser = Hmmer3TextParser(inp)
+                for result in parser:
+                    for hit in result.iterhits():
+                        if hit.evalue <= self.hmm_evalue:
+                            ids.add(hit.id)
+            #filter psi-blast results
+            filtered = []
+            for rec in records:
+                if rec.id in ids or rec.name in ids:
+                    filtered.append(rec)
+            if not filtered:
+                print 'All sequences were filtered out.' 
+                return False
+            SeqIO.write(filtered, filteredfile, 'gb')
+            print 'Done\n'
+            return True
+        except Exception, e:
+            print 'Unable to filter sequences with HMM profile.'
+            print e
+            print
+            return False
+        finally: safe_unlink(hmm_out)
+    
+    @PipelineNode.new(msg='filter out close homologs')    
+    def _hom_filter_data(self, filteredfile, recordsfile):
+        print 'Filtering out close homologs. This will take a wile:'
+        records = SeqIO.index(recordsfile, 'gb')
+        if not records: return False
+        @MultiprocessingBase.data_mapper
+        def _worker(qi, queries, db, skip):
+            homologs = set()
+            if qi in skip: return qi, homologs
+            results = BlastCLI.blast_seq(queries[qi], db, evalue=10, command='blastp')
+            if not results: return homologs
+            for r in results:
+                for ali in r.alignments:
+                    identities = sum(hsp.identities for hsp in ali.hsps)
+                    if identities/float(ali.length) > self.hom_filter:
+                        rid = ali.hit_def.split()[0]
+                        if rid: homologs.add(rid)
+            try: homologs.remove(qi)
+            except: pass
+            skip.update(homologs)
+            return qi, homologs
+        @MultiprocessingBase.results_assembler
+        def _assembler(qi, result, homologs, prg):
+            homologs[result[0]] = result[1]
+            prg.count()
+        homologs = {}
+        rids = sorted(records.keys())
+        try:
+            with user_message('Formatting blast DB', '\n'):
+                dbdir = tempfile.mkdtemp('_blastDB')
+                sfile = mktmp_fasta(records.itervalues())
+                cline = FormatDBCommandline(input=sfile, protein='T', name=recordsfile)
+                self.run_cline(cline, cwd=dbdir)
+                dbname = os.path.join(dbdir, recordsfile)
+            with ProgressCounter('Searching for homologs using local blastp...', len(records)) as prg:
+                work = self.Work()
+                work.prepare_jobs(_worker, rids, None, records, dbname, set())
+                work.set_assembler(_assembler, homologs, prg)
+                self.start_work(work)
+                if not self.wait(work): return False
+        except Exception, e:
+            print e
+            print
+            return False
+        finally: 
+            os.unlink(sfile)
+            shutil.rmtree(dbdir, ignore_errors=True)
+        with user_message('Removing all homologs from each group except the first one...'):
+            remove = set()
+            for ri in rids:
+                if ri in remove: continue
+                h = homologs.pop(ri, None)
+                if h: remove.update(h)
+            if not safe_write((records[ri] for ri in records if ri not in remove), filteredfile, 'gb'):
+                return False
+        return True
+    
+    @PipelineNode.new(required=[_parse_genes], 
+                      msg='merge additional sequences into initial set', always_run=True)
+    def _merge_additional_data(self, merged, *addrecords):
+        try:
+            print 'Merging additional sequences into the database...'
+            num_records = len(self.alignment)
+            for records in addrecords:
+                for rec in SeqIO.parse(records, 'gb'):
+                    org = Organism.from_record(rec)
+                    if not org.belongs2(self.lineage):
+                        print '%s does not belong to %s' %(org.description, self.lineage) 
+                        continue
+                    shash = hash(str(rec.seq))
+                    if shash in self.alignment:
+                        print '%s sequence is the exact same as %s' % (rec.id, self.alignment[shash].id)
+                        self.alignment[shash].description += ', '+rec.annotations.get('organism', rec.name)
+                    else: 
+                        print 'Adding sequence %s from %s' % (org.org, org.description)
+                        self.alignment[shash] = rec
+                        self.genes[org.org] = kgene(org.org, org.org, rec.description)
+                        self.organisms[org.org] = org
+            self.organisms.fix_lineages()
+            if num_records >= len(self.alignment):
+                print 'No sequences were merged.\n'
+                return False
+            changed = True
+            if os.path.isfile(merged):
+                loaded = set(r.id for r in self.alignment.values())
+                saved = set(r.id for r in SeqIO.parse(merged, 'fasta'))
+                changed = saved != loaded
+            if changed: SeqIO.write(self.alignment.values(), merged, 'fasta')
+        except Exception, e:
+            print 'Failed to merge additional data.'
+            print e
+            print
+            return False
+        print 'Done\n'
+        return True
+    
+    @PipelineNode.new(inputs=[hmmbuild_data], 
+                      msg='search local genomes with HMM profile')
+    def _get_local_data(self, hmmfile, addrecords):
+        if not self.add_dirs and not self.add_files: return False
+        genomes = []
+        loader = SeqLoader(self._abort_event)
+        for d in self.add_dirs:
+            gs = loader.load_dir(d, 'gb', '.*\.gb') #TODO: add scheme detection
+            if gs: genomes += gs
+        if self.add_files:
+            gs = loader.load_files(self.add_files, 'gb', '.*\.gb') #TODO: add scheme detection
+            if gs: genomes += gs
+        if not genomes:
+            print 'No genomes were loaded from provided dirs/files.\n'
+            return False
+        results = []
+        hmmer = BatchHmmer(self._abort_event)
+        for genome in genomes:
+            result = hmmer.hmmsearch_genome(hmmfile, genome, table=11)
+            if result: results.extend((result[fi][1] for fi in result))
+        if not results:
+            print 'No additional genes found.\n'
+            return False
+        if not safe_write(results, addrecords, 'gb'): return False
+        print 'Done\n'
+        return True
+    
+    def get_local_data(self):
+        if not self._get_local_data(): return False
+        self._merge_additional_data.plug(self._get_local_data)
+    
+    def get_psiblast_data(self):
+        if not (self._psiblast_data() and
+                self._fetch_psiblast_data()):
+            return False
+        psi_data = self._fetch_psiblast_data
+        if self._filter_unique_date(psi_data):
+            psi_data = self._filter_unique_date 
+        if self.hmm_evalue >= 0 and self._hmm_filter_data(psi_data):
+            psi_data = self._hmm_filter_data
+        if self.hom_filter > 0 and self._hom_filter_data(psi_data):
+            psi_data = self._hom_filter_data
+        self._merge_additional_data.plug(psi_data)
+
+    def merge_additional_data(self):
+        try: 
+            if not self._merge_additional_data(): return False
+        except RuntimeError: return False
+        realign_merged = self.align_data.copy()
+        realign_merged.outfile = self.malnfile
+        realign_merged.plug(self._merge_additional_data)
+        if realign_merged():
+            self.build_tree.replug(self.align_data, realign_merged)
+    
+    @PipelineNode.new(inputs=[align_data], msg='run fasttree')
+    def build_tree(self, treefile, alnfile):
+        print 'Building an approximate-ML tree with fasttree.'
+        print 'This may take a while...'
+        args = dict(input=alnfile, out=treefile, pseudo=1)
+        if num_fasta_records(alnfile) >= 10000:
+            args['fastest'] = True
+            args['boot'] = 100
+        if not self.run_cline(FastTreeCommandline(**args)):
+            return False 
+        print 'Done\n'
+        return True
+    
+    def _set_node_taxonomy(self, node, parent_lineage, collapse_genera, collapse_min_nodes, collapse_hard, lineage_colors):
         '''
         Sets edge labels to clade names.
         Optionally, "collapse" (in Dendroscope's sense) genus nodes
         '''
-        lineages = [l.edge.lineage for l in node.leaf_iter() if l.edge.lineage]
+        lineages = [l.edge.lineage for l in node.leaf_iter() if hasattr(l.edge, 'lineage') and l.edge.lineage]
         bigclade = len(lineages) >= collapse_min_nodes 
-        if bigclade and Lineage.allsame(lineages):
+        if bigclade and Lineage.samelast(lineages):
             lineage = lineages[0]-self.lineage
             if collapse_genera and lineage != parent_lineage:
-                for cn in node.preorder_internal_node_iter():
-                    cn.annotations.add_new('collapse', '', 
-                                           datatype_hint='xsd:string')
+                print 'Collapsing %s' % str(lineage.last)
+                if collapse_hard:
+                    children = node.num_child_nodes()
+                    for child in node.child_node_iter():
+                        node.remove_child(child)
+                    node.label = '%s (%d leafs collapsed)' % (lineage.last, children)
+                else:
+                    for cn in node.preorder_internal_node_iter():
+                        cn.annotations.add_new('collapse', '', 
+                                               datatype_hint='xsd:string')
         else: 
             lineage = Lineage.common(lineages)
             if lineage: lineage = lineage-self.lineage
+        #colorize edges
         if lineage and lineage != parent_lineage:
             if bigclade and node.parent_node and node.is_internal():
                 node.edge.label = lineage.last.capitalize()
@@ -397,12 +850,17 @@ class EC_Analyzer(object):
                 #construct color meta for Dendroscope
                 if col:
                     for cn in node.preorder_iter():
-                        cn.edge.annotations.add_new('format', 
-                                                    ' fg=%d %d %d;' % col.bitmap_rgb(),
-                                                    datatype_hint='xsd:string')
+                        value = ' fg=%d %d %d;' % col.bitmap_rgb()
+                        if cn.edge.annotations:
+                            a = filter(lambda a: a.name == 'format', cn.edge.annotations)
+                            if a: a[0].value = value
+                        else:
+                            cn.edge.annotations.add_new('format', value,
+                                                        datatype_hint='xsd:string')
         for child in node.child_node_iter():
-            self._set_node_taxonomy(child, lineage, collapse_genera, collapse_min_nodes, lineage_colors)
-            
+            self._set_node_taxonomy(child, lineage, collapse_genera, collapse_min_nodes, collapse_hard, lineage_colors)
+    
+    _organism_re = re.compile(r'\s\[.*?\]\.?$')
     def process_tree(self, **kwargs):
         '''
         Accepted kwargs:
@@ -412,17 +870,13 @@ class EC_Analyzer(object):
         reroot_at_midpoint : bool : reroots the tree at mid-point
         lineage_colors : dict : a dictionary of colors in html or color-name notation with lowercase taxons as keys
         '''
-        if not os.path.isfile(self.treefile):
+        treefile = self.build_tree.outfile
+        if not os.path.isfile(treefile):
             print 'No tree file found.'
             return False
-        #parse args
-        collapse_genera = kwargs.pop('collapse_genera', False)
-        collapse_min_nodes = kwargs.pop('collapse_min_nodes', 3)
-        reroot = kwargs.pop('reroot_at_midpoint', False)
         min_support = kwargs.pop('min_support', False)
-        lineage_colors = kwargs.pop('lineage_colors', None)
-        with user_message('Processing tree file...'):
-            self.tree = dp.Tree.get(path=self.treefile, schema='newick')
+        with user_message('Processing tree file...', '\n'):
+            self.tree = dp.Tree.get(path=treefile, schema='newick')
             if not self.tree:
                 print 'No tree loaded.'
                 return False
@@ -432,7 +886,8 @@ class EC_Analyzer(object):
                 org = self.organisms[gene.org]
                 if not org: continue
                 leaf.edge.lineage = org.lineage
-                leaf.taxon.label = '%s [%s]' % (org.description, gene.id)
+                leaf.taxon.label = '%s (%s)' % (org.description, gene.id)
+                if gene.description: leaf.taxon.label += ' '+self._organism_re.sub('', gene.description)
                 leaf.label = leaf.taxon.label
             if min_support:
                 for node in self.tree.postorder_internal_node_iter(exclude_seed_node=True):
@@ -440,10 +895,15 @@ class EC_Analyzer(object):
                     except ValueError: pass
                     if support < min_support and node.edge:
                         node.edge.collapse(adjust_collapsed_head_children_edge_lengths=True)
-            self._set_node_taxonomy(self.tree.seed_node, None, collapse_genera, collapse_min_nodes, lineage_colors)
-        if reroot:
+        if kwargs.pop('reroot_at_midpoint', False):
             with user_message('Rerooting tree at midpoint...'):
                 self.tree.reroot_at_midpoint()
+        with user_message('Adding taxonomy information to the tree...', '\n'):
+            self._set_node_taxonomy(self.tree.seed_node, None, 
+                                    kwargs.pop('collapse_genera', False), 
+                                    kwargs.pop('collapse_min_nodes', 3), 
+                                    kwargs.pop('collapse_hard', False),
+                                    kwargs.pop('lineage_colors', None))
         with user_message('Saving resulting tree...'):
             self.tree.write(path=self.otreefile, schema='newick')
             self.tree.write(path=self.xtreefile, schema='nexml')
@@ -460,9 +920,7 @@ class EC_Analyzer(object):
         for attr in attrs:  meta.setAttribute(attr, attrs[attr])
         if e.hasChildNodes(): e.insertBefore(meta, e.childNodes[0])
         else: e.appendChild(meta)
-                             
     
-    _nsre = re.compile(r'(\{.*\}).*')
     def _postprocess_nexml(self, nexml_file):
         d = minidom.parse(nexml_file)
         #get collapsed nodes' ids
@@ -507,90 +965,161 @@ class EC_Analyzer(object):
 #end class
         
 
-if __name__ == '__main__':
-    #parse command line
-    parser = argparse.ArgumentParser(description='Fetches all protein sequences '
+class Main(MPMain):
+    
+    def __init__(self, pid):
+        super(Main, self).__init__(pid)
+        parser = argparse.ArgumentParser(description='Fetches all protein sequences ' #TODO: correct the description
                                      'for a given EC number from KEGG database, '
                                      'filters them according to given lineage '
                                      'and optionally aligns them using MUSCLE '
-                                     'or Mafft, builds a tree with FastTree.')
-    parser.add_argument('project', metavar='project_name',
+                                     'or Mafft, builds a tree with FastTree.') 
+
+        parser.add_argument('project', metavar='project_name',
                         type=str, help='Name of the project')
-    parser.add_argument('EC', metavar='EC_number',
+        parser.add_argument('EC', metavar='EC_number',
                         type=str, help='EC number of the enzyme to analyze')
-    parser.add_argument('-s', '--subproject', metavar='subproject_name', default=None,
-                        type=str, help='Lineage of interest given as string with clades '
-                        '(from top to bottom) separated by semicolon')
-    parser.add_argument('-l', '--lineage', metavar='"Phylum;Class;..."', default='',
-                        type=str, help='Lineage of interest given as string with clades '
-                        '(from top to bottom) separated by semicolon')
-    parser.add_argument('-F', '--filter', metavar='"regex.*filter"', default=None,
-                        type=str, help='Regular expression pattern that should match (a part '
-                        'of) the DEFINITION of each gene of interest. If not provided, '
-                        'every gene is included into the analysis.')
-    parser.add_argument('-f', '--force', action='store_true',
+        parser.add_argument('-f', '--force', action='store_true',
                         help='Forces fetching of all the data from the KEGG.')
-    parser.add_argument('-a', '--align-with', metavar=EC_Analyzer.aligners[0],
-                        type=str, 
-                        help='Align obtained sequences using selected method. '
-                        'Supported methods: %s' % ' '.join(EC_Analyzer.aligners))
-    parser.add_argument('-t', '--build-tree', action='store_true',
-                        help='Build phylogenetic tree with FastTree.')
-    parser.add_argument('-r', '--reroot-at-midpoint', action='store_true',
-                        help='Reroot resulting tree at midpoint.')
-    parser.add_argument('-m', '--min-support', default=None, metavar='float [0:1]',
-                        type=float, help='Collapse splits with support < min-support.')
-    parser.add_argument('-c', '--collapse-genera', default=None, metavar='N',
-                        type=int, help='Collapse genera with number of nodes >= N to '
-                        'trapezium leafs in Dendroscope.')
-    parser.add_argument('--colors', metavar='"archaea:#f3ad6;bacteria:blue"',
-                        type=str, help='Colorize tree edges by phylogeny using provided colors '
-                        'for Dendroscope. Both html notation and predefined color '
-                        'names are supported.')
-    args = parser.parse_args()
-    
-    #create the project
-    proj = EC_Analyzer(args.project, args.EC, 
-                       lineage=args.lineage, 
-                       gene_filter=args.filter,
-                       subproject=args.subproject)
-    #save current command line
-    script_file = proj.namebase+'.sh'
-    with open(script_file, 'w') as out:
-        out.write('#!/bin/bash\n')
-        out.write(os.path.basename(sys.argv[0])+' ')
-        argsl = ''
-        for arg in sys.argv[1:]:
-            if arg.startswith('-'):
-                argsl += arg+' '
-            else: argsl += "'%s' " % arg
-        out.write(argsl)
-    os.chmod(script_file, 0775)
-    #get database of organisms
-    EC_Analyzer.get_organisms(force=args.force)
-    #get the genes to analyze
-    proj.get_data(force=args.force)
-    #align if requested
-    if args.align_with: 
-        proj.align_data(args.align_with)
-    #build the tree if requested
-    if args.build_tree:
-        proj.fasttree_alignment()
-        #parse colors
-        lineage_colors = None 
-        if args.colors:
-            lineage_colors = dict()
-            for col in args.colors.split(';'): 
-                lc = col.strip().split(':') 
-                if len(lc) == 2: 
-                    col = lc[1]
-                    if col.startswith('#'):
-                        col = colors.HexColor(col)
-                    else: col = getattr(colors, col, None)
-                    if col: lineage_colors[lc[0]] = col
-        #process the tree
-        proj.process_tree(collapse_genera=args.collapse_genera, 
-                          collapse_min_nodes=args.collapse_genera if args.collapse_genera else 3,
-                          min_support=args.min_support,
-                          reroot_at_midpoint=args.reroot_at_midpoint,
-                          lineage_colors=lineage_colors)
+        
+        filters = parser.add_argument_group('Filtering options')
+        filters.add_argument('-s', '--subproject', metavar='subproject_name', default=None,
+                            type=str, help='Optional subproject name that allows to work '
+                            'with the same gene database using different filters.')
+        filters.add_argument('-l', '--lineage', metavar='"Phylum;Class;..."', default='',
+                            type=str, help='Lineage of interest given as string with clades '
+                            '(from top to bottom) separated by semicolon.')
+        filters.add_argument('-F', '--def-filter', metavar='"regex.*filter"', default=None,
+                            type=str, help='Regular expression pattern that should match (a part '
+                            'of) the DEFINITION of each gene of interest. If not provided, '
+                            'every gene is included into the analysis.')
+        
+        alignment = parser.add_argument_group('Alignment options')
+        alignment.add_argument('-a', '--align-with', metavar=EC_Analyzer.aligners[0],
+                            type=str,
+                            help='Align obtained sequences using selected method. '
+                            'Supported methods: %s' % ' '.join(EC_Analyzer.aligners))
+        alignment.add_argument('--hmm', action='store_true',
+                            help='Build HMM profile of the aligned sequences. '
+                            'Implies -a %s' % EC_Analyzer.aligners[0])
+        
+        addons = parser.add_argument_group('Private sequences', 
+                                           'Add genes from locally available genomes. '
+                                           'Implies --hmm')
+        addons.add_argument('--add-dirs', metavar='/path/to/dir', nargs='+',
+                            type=str, 
+                            help='Paths to directories containing genomes to search for genes of interest')
+        addons.add_argument('--add-files', metavar='/path/to/file', nargs='+',
+                            type=str, 
+                            help='Paths to files containing genomes to search for genes of interest')
+        
+        psi = parser.add_argument_group('PSI-BLAST options', 
+                                        'Add genes from NCBI database found with psi-blast search')
+        psi.add_argument('-e', '--email', metavar='you.address@domain.com',
+                            type=str, help='To use NCBI online services you email is required')
+        psi.add_argument('-p', '--psi-blast', action='store_true',
+                            help='Enrich KEGG data with psi-blast results. '
+                            'Implies -a %s' % EC_Analyzer.aligners[0])
+        psi.add_argument('--psi-evalue', default=1e-10, type=float, metavar='1e-10',
+                            help='Filter out hits with E-value grater than this.')
+        psi.add_argument('--max-targets', default=1000, type=int, metavar='1000',
+                            help='Maximum number of target sequences to report.')
+        psi.add_argument('-H', '--hmm-filter', default=-1, type=float, metavar='evalue',
+                            help='Filter psi-blast results with HMM profile using evalue cutoff. '
+                            'Implies --hmm')
+        psi.add_argument('--homologs-filter', default=-1, type=float, metavar='%identity',
+                            help='Filter out close homologs from psi-blast results using blast %identity cutoff')
+        
+        tree = parser.add_argument_group('Tree options')
+        tree.add_argument('-t', '--build-tree', action='store_true',
+                            help='Build phylogenetic tree with FastTree.')
+        tree.add_argument('-r', '--reroot-at-midpoint', action='store_true',
+                            help='Reroot resulting tree at midpoint.')
+        tree.add_argument('-m', '--min-support', default=None, metavar='float',
+                            type=float, help='Collapse splits with support < min-support.')
+        tree.add_argument('-c', '--collapse-genera', default=None, metavar='N',
+                            type=int, help='Collapse genera with number of nodes >= N to '
+                            'trapezium leafs in Dendroscope.')
+        tree.add_argument('--collapse-hard', action='store_true',
+                            help='When collapsing a genus, actually remove its subtree, '
+                            'leaving only one labeled leaf. Usefull for huge trees.')
+        tree.add_argument('--colors', metavar='"archaea:#f3ad6;bacteria:blue"',
+                            type=str, help='Colorize tree edges by phylogeny using provided colors '
+                            'for Dendroscope. Both html notation and predefined color '
+                            'names are supported.')
+        self.parser = parser
+        self.args = None
+        
+    def _parse_args(self):
+        args = self.parser.parse_args()
+        if args.hmm and not args.align_with:
+            args.align_with = EC_Analyzer.aligners[0]
+        if args.add_dirs or args.add_files:
+            args.hmm = True
+        if args.psi_blast:
+            if not args.email:
+                print 'You email is required to make Entrez queries at NCBI.'
+                print 'Please, provided via -e argument.'
+                sys.exit(1)
+            if not args.align_with:
+                args.align_with = EC_Analyzer.aligners[0]
+            if args.hmm_filter:
+                args.hmm = True
+        self.args = args
+        
+    def _main(self):
+        self._parse_args()
+        args = self.args
+        #create the project
+        proj = EC_Analyzer(self.abort_event, **vars(args))
+        #save current command line
+        script_file = proj.namebase+'.sh'
+        with open(script_file, 'w') as out:
+            out.write('#!/bin/bash\n')
+            out.write(os.path.basename(sys.argv[0])+' ')
+            argsl = ''
+            for arg in sys.argv[1:]:
+                if arg.startswith('-'):
+                    argsl += arg+' '
+                else: argsl += "'%s' " % arg
+            out.write(argsl)
+        os.chmod(script_file, 0775)
+        #get database of organisms
+        EC_Analyzer.get_organisms(force=args.force)
+        #get the genes to analyze
+        if not proj.get_genes(): return 1
+        #run analysis pipelines
+        if args.align_with and not proj.align_data(): return 2 
+        if args.hmm and not proj.hmmbuild_data(): return 3
+        if args.add_dirs or args.add_files:
+            proj.get_local_data()
+        if args.psi_blast:
+            proj.get_psiblast_data()
+        proj.merge_additional_data()
+        #build the tree if requested
+        if args.build_tree:
+            if not proj.build_tree(): return 4
+            #parse colors
+            lineage_colors = None 
+            if args.colors:
+                lineage_colors = dict()
+                for col in args.colors.split(';'): 
+                    lc = col.strip().split(':') 
+                    if len(lc) == 2: 
+                        col = lc[1]
+                        if col.startswith('#'):
+                            col = colors.HexColor(col)
+                        else: col = getattr(colors, col, None)
+                        if col: lineage_colors[lc[0]] = col
+            #process the tree
+            proj.process_tree(collapse_genera=args.collapse_genera, 
+                              collapse_min_nodes=args.collapse_genera if args.collapse_genera else 3,
+                              collapse_hard=args.collapse_hard,
+                              min_support=args.min_support,
+                              reroot_at_midpoint=args.reroot_at_midpoint,
+                              lineage_colors=lineage_colors)
+        return 0
+
+if __name__ == '__main__':
+    main = Main(os.getpid())
+    sys.exit(main())

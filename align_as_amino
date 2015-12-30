@@ -37,7 +37,7 @@ try:
 except:
     print "The BioPython must be installed in your system for this script to work."
     sys.exit(1)
-from BioUtils.CommonTools import print_exception
+from BioUtils.Tools import print_exception
 from BioUtils.Alignment import Alignment
 
 #parse command line arguments

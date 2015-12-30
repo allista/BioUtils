@@ -27,7 +27,7 @@ from dendropy.datamodel.charstatemodel import BinaryStateAlphabet
 from dendropy.datamodel.charmatrixmodel import CharacterSubset
 import argparse
 
-from BioUtils.CommonTools import user_message, Progress
+from BioUtils.Tools import user_message, Progress
 
 class GapEncoder(object):
     '''Encode gaps information from an alignment into a binary data-matrix 

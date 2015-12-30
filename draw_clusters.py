@@ -22,8 +22,9 @@ Created on Dec 11, 2015
 '''
 
 import os, re
-from BioUtils.CommonTools import isatty, load_files
-from BioUtils.Blast import LocalBlast
+from BioUtils.Tools import isatty
+from BioUtils.SeqUtils import load_files
+from BioUtils.NCBI import BlastCLI
 
 from reportlab.lib import colors
 from reportlab.lib.units import cm
@@ -124,7 +125,8 @@ class ClusterProject(MultiprocessingBase):
     
     @MultiprocessingBase.data_mapper_method
     def _blast_feature(self, f, c1, c2, features1, features2, evalue, max_rlen):
-        hsps = LocalBlast.r2r_blast(f.extract(c1), c2, evalue, max_rlen, command='blastn', task='blastn')
+        results = BlastCLI.s2s_blast(f.extract(c1), c2, evalue, max_rlen, command='blastn', task='blastn')
+        hsps = BlastCLI.all_hsps(results, max_rlen)
         if not hsps: return [(None, None, None)]
         f1 = []
         f2 = []
