@@ -1,0 +1,134 @@
+#!/usr/bin/python
+# coding=utf-8
+'''
+Created on Jan 3, 2016
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+from __future__ import division
+import numpy as np
+np.seterr(divide='ignore') # these warnings are usually harmless for this code
+from matplotlib import pyplot as plt
+import copy, os, sys
+
+import pyhsmm
+from pyhsmm.util.text import progprint_xrange
+
+SAVE_FIGURES = False
+
+###############
+#  load data  #
+###############
+
+from BioUtils import SeqUtils
+from Bio import AlignIO
+from Bio.Align import MultipleSeqAlignment
+
+genomename = u'/home/allis/Dropbox/Science/Микра/Thermococcus/sequence/GenBank/Thermococcus/Thermococcus_onnurineus_NA1-complete-genome.gb'
+alnfile = u'/home/allis/Dropbox/Science/Микра/Thermococcus/Formate_transporters.clean.aln'
+
+aln = list(AlignIO.parse(alnfile, 'clustal'))[0]
+
+#genomes = SeqUtils.SeqLoader.load_file(genomename, 'gb')
+#if not genomes:
+#    print 'No genome loaded'
+#    sys.exit(1)
+#subseq = genomes[0][1430000:1431882] #1452229]
+
+def recode_seq(seq):
+    seq = [l for l in seq if l != '-']
+    data = np.zeros(len(seq))
+    for i, l in enumerate(seq):
+        if l == 'A': data[i] = 1
+        elif l == 'T': data[i] = 2
+        elif l == 'G': data[i] = 3
+        elif l == 'C': data[i] = 4
+        else: data[i] = 0
+    return data
+
+durs = [[124,15,231,32,317,12,54],
+        [127,17,251,31,393,10,52],
+        [121,19,281,36,358,14,56],
+        [134,11,191,22,274,19,51],
+        ]
+states = [1,0,2,0,3,0,4]
+
+from itertools import chain
+def make_data(dur, states):
+    return np.fromiter(chain(*[[s]*d for s, d in zip(states, dur)]), dtype=int)
+
+data = [make_data(dur, states) for dur in durs]
+
+#for seq in aln:
+#    data.append(recode_seq(seq))
+#data = np.asarray(data, int).transpose()
+#print data
+#print data.shape
+
+#get saved model
+import cPickle
+model = None
+modelfile = 'hsmm.model'
+if os.path.isfile(modelfile):
+    with open(modelfile, 'rb') as inp:
+        try: model = cPickle.load(inp)
+        except Exception, e: print e
+
+if True or model is None:
+    #########################
+    #  posterior inference  #
+    #########################
+    
+    # Set the weak limit truncation level
+    Nmax = max(states)+1
+    
+    # and some hyperparameters
+    obs_dim = 1
+    obs_hypparams = {'mu_0':np.zeros(obs_dim),
+                    'sigma_0':np.eye(obs_dim),
+                    'kappa_0':0.25,
+                    'nu_0':obs_dim+2}
+    dur_hypparams = {'alpha_0':400,
+                     'beta_0':1}
+    
+    obs_distns = [pyhsmm.distributions.Gaussian(**obs_hypparams) for state in range(Nmax)]
+    dur_distns = [pyhsmm.distributions.PoissonDuration(**dur_hypparams) for state in range(Nmax)]
+    
+#    trans_matrix = [[0,0,1./3,1./3,1./3],
+#                    [1,0,0,0,0],
+#                    [1,0,0,0,0],
+#                    [1,0,0,0,0],
+#                    [0,0,0,0,0],
+#                    ]
+#    trans_matrix = np.array(trans_matrix, dtype=float)#.transpose()
+#    print trans_matrix
+    
+    model = pyhsmm.models.WeakLimitHDPHSMM(
+            alpha=3.,gamma=3., # these can matter; see concentration-resampling.py
+            init_state_concentration=6., # pretty inconsequential
+            obs_distns=obs_distns,
+            dur_distns=dur_distns)#,
+#            trans_matrix=trans_matrix)
+    for d in data:
+        model.add_data(d, stateseq=d,trunc=400) # duration truncation speeds things up when it's possible
+    
+    for idx in progprint_xrange(100):
+        model.resample_model(num_procs=4)
+    
+    with open(modelfile, 'wb') as out:
+        cPickle.dump(model, out, protocol=-1)
+    
+from random import shuffle
+testseq = make_data([129,31,32,217,51,78,34,223], [1,3,0,1,2,1,0,2])
+
+print model.trans_distn.trans_matrix
+
+print testseq
+print model.log_likelihood(testseq)/sum(testseq)
+for d in data: print model.log_likelihood(d)/sum(d)
+
+plt.plot(model.heldout_viterbi(testseq))
+
+#for ss in model.stateseqs: plt.plot(ss)
+plt.show()
