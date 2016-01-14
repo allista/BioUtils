@@ -20,22 +20,30 @@ Created on Mar 6, 2013
 @author: Allis Tauri <allista@gmail.com>
 '''
 
-import errno
+import errno, traceback, sys
 import multiprocessing as mp
-from UMP import UProcess
-from Queue import Empty
 from collections import Sequence
 from threading import Thread
-from AbortableBase import AbortableBase
+from Queue import Empty
 
+from .UMP import UProcess
+from .AbortableBase import AbortableBase, aborted
 
 cpu_count = mp.cpu_count()
+
+def raise_tb(): raise RuntimeError(''.join(traceback.format_exception(*sys.exc_info())))
+
+def raise_tb_on_error(func):
+    def wrapper(*args, **kwargs):
+        try: return func(*args, **kwargs)
+        except: raise_tb()
+    return wrapper
 
 #decorators
 def worker(func):
     def worker(queue, abort_event, *args, **kwargs):
-        result = func(abort_event, *args, **kwargs)
-        if abort_event.is_set(): queue.cancel_join_thread()
+        result = raise_tb_on_error(func)(abort_event, *args, **kwargs)
+        if aborted(abort_event): queue.cancel_join_thread()
         else: queue.put(result)
         queue.put(None)
         queue.close()
@@ -45,8 +53,8 @@ def worker(func):
     
 def worker_method(func):
     def worker_method(self, queue, abort_event, *args, **kwargs):
-        result = func(self, abort_event, *args, **kwargs)
-        if abort_event.is_set(): queue.cancel_join_thread()
+        result = raise_tb_on_error(func)(self, abort_event, *args, **kwargs)
+        if aborted(abort_event): queue.cancel_join_thread()
         else: queue.put(result)
         queue.put(None)
         queue.close()
@@ -57,7 +65,7 @@ def worker_method(func):
 def data_mapper(func):
     def mapper(queue, abort_event, in_queue, data, *args):
         while True:
-            if abort_event.is_set():
+            if aborted(abort_event):
                 queue.cancel_join_thread() 
                 break
             try: item = in_queue.get(True, 0.1)
@@ -72,7 +80,7 @@ def data_mapper(func):
                 queue.put(None)
                 queue.close()
                 break
-            result = func(data[item], *args)
+            result = raise_tb_on_error(func)(data[item], *args)
             queue.put((item, result))
     return mapper
 #end def
@@ -80,7 +88,7 @@ def data_mapper(func):
 def data_mapper_method(func):
     def mapper_method(self, queue, abort_event, in_queue, data, *args):
         while True:
-            if abort_event.is_set():
+            if aborted(abort_event):
                 queue.cancel_join_thread() 
                 break
             try: item = in_queue.get(True, 0.1)
@@ -95,7 +103,7 @@ def data_mapper_method(func):
                 queue.put(None)
                 queue.close()
                 break
-            result = func(self, data[item], *args)
+            result = raise_tb_on_error(func)(self, data[item], *args)
             queue.put((item, result))
     return mapper_method
 #end def
@@ -199,10 +207,10 @@ class Work(Sequence, Thread, AbortableBase):
         assert self._launched, 'Work should be launched before calling get_results'
         assert self._assembler is not None, 'Assembler should be set before calling get_results'
         while self._jobs:
-            if self.aborted(): break
+            if self.aborted(): return
             finished_job = None
             for i,job in enumerate(self._jobs):
-                if self.aborted(): break
+                if self.aborted(): return
                 try: 
                     out = job[1].get(True, self._timeout)
                     if out is not None:
@@ -270,6 +278,9 @@ class MultiprocessingBase(AbortableBase):
     data_mapper_method      = staticmethod(data_mapper_method)
     results_assembler       = staticmethod(results_assembler)
     results_assembler_methd = staticmethod(results_assembler_methd)
+    
+    raise_tb                = staticmethod(raise_tb)
+    raise_tb_on_error       = staticmethod(raise_tb_on_error)
     
     ordered_results_assembler   = staticmethod(ordered_results_assembler)
     unordered_results_assembler = staticmethod(unordered_results_assembler)

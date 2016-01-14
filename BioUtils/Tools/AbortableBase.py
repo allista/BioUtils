@@ -25,6 +25,10 @@ class DummyEvent(object):
     def set(self): pass
 #end class
 
+def aborted(abort_event):
+    try: return abort_event.is_set()
+    except IOError: return True
+
 class AbortableBase(object):
     '''Base class for all that need to be cleanly aborted through an event'''
     __metaclass__ = ABCMeta
@@ -36,8 +40,7 @@ class AbortableBase(object):
     
     def aborted(self):
         if self._aborted: return True
-        try: self._aborted = self._abort_event.is_set()
-        except IOError: self._aborted = True
+        self._aborted = aborted(self._abort_event)
         return self._aborted
     #end def
 #end class
