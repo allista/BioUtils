@@ -31,7 +31,7 @@ def read(fname):
 
 from distutils.core import setup
 setup(name='seqconv',
-      version='1.2',
+      version='1.3',
       description='A set of utilities for bioinformatics.',
       long_description=read('README'),
       license='GPL-3',
@@ -44,7 +44,8 @@ setup(name='seqconv',
         'Intended Audience :: Science/Research',
         'Operating System :: POSIX',
         'Programming Language :: Python'],
-      packages=['BioUtils'],
+#      install_require=['biopython>=1.6', 'dendropy>=4.0', 'numpy', 'scipy'],
+      packages=['BioUtils', 'BioUtils.HMMER3', 'BioUtils.NCBI', 'BioUtils.Tools'],
       scripts=['seqconv',
                'align_as_amino',
                'gaps_encoder',
