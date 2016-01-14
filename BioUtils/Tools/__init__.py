@@ -73,7 +73,7 @@ def safe_unlink(filename):
 
 
 class MPMain(object):
-    def __init__(self, pid):
+    def __init__(self, pid=os.getpid()):
         self.pid = pid
         self.abort_event = Event()
         signal.signal(signal.SIGINT,  self.sig_handler)
