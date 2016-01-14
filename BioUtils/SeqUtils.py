@@ -1,4 +1,3 @@
-#!/usr/bin/python
 # coding=utf-8
 #
 # Copyright (C) 2015 Allis Tauri <allista@gmail.com>
@@ -39,7 +38,7 @@ class SeqLoader(MultiprocessingBase):
         super(SeqLoader, self).__init__(abort_event)
         
     @staticmethod
-    def _load_file(filename, schema):
+    def load_file(filename, schema):
         if not os.path.isfile(filename): return None
         try: return list(SeqIO.parse(filename, schema))
         except Exception, e:
@@ -61,8 +60,56 @@ class SeqLoader(MultiprocessingBase):
         return self.load_files(files, schema)
     
     def load_files(self, files, schema):
-        return list(itertools.chain(*[r for r in self.parallelize_work(1, self._load_file, files, schema) if r]))
+        return list(itertools.chain(*[r for r in self.parallelize_work(1, self.load_file, files, schema) if r]))
 
+    
+class Translator(MultiprocessingBase):
+    def __init__(self, abort_event):
+        super(Translator, self).__init__(abort_event)
+        
+    @staticmethod
+    @MultiprocessingBase.data_mapper
+    @shelf_result
+    def _translate_genes(fi, rec, table):
+        f = rec.features[fi]
+        srec = f.extract(rec)
+        try: 
+            tsec = srec.seq.translate(table)
+            if tsec[-1] == '*': tsec = tsec[:-1]
+            fid = f.qualifiers.get('locus_tag', [None])[0]
+            if not fid: fid = '%s_f%d' % (rec.id, fi)
+            trec = SeqRecord(tsec,
+                             id=fid, name=rec.name,
+                             description=rec.description,
+                             annotations=rec.annotations)
+            pf = SeqFeature(FeatureLocation(0, len(trec)), 
+                            id=f.id, type='CDS',
+                            qualifiers=f.qualifiers)
+            trec.features.append(pf)
+        except Exception, e:
+            print e
+            raise RuntimeError('Unable to translate: %s' % str(srec.seq))
+        return trec 
+    
+    @staticmethod
+    @MultiprocessingBase.results_assembler
+    def _translation_assembler(index, tname, translations):
+        if tname and os.path.isfile(tname):
+            with roDict(tname) as db:
+                translations[index] = db['result']
+            cleanup_file(tname)
+            
+    def translate(self, rec, features=None, table='Standard', join=False, gap='X'*20):
+        if features is None: features = rec.features
+        translation = [None]*len(features)
+        work = self.Work()
+        work.prepare_jobs(self._translate_genes, features, None, rec, table)
+        work.set_assembler(self._translation_assembler, translation)
+        self.start_work(work)
+        if not self.wait(work): return None
+        if join: return cat_records(translation, gap=gap)
+        return translation
+    
     
 def load_dir(abort_event, dirname, schema, namefilter=None):
     loader = SeqLoader(abort_event)
@@ -134,49 +181,10 @@ def get_indexes_of_genes(rec):
             return None
     return features
 
-class Translator(MultiprocessingBase):
-    def __init__(self, abort_event):
-        super(Translator, self).__init__(abort_event)
-        
-    @staticmethod
-    @MultiprocessingBase.data_mapper
-    @shelf_result
-    def _translate_genes(fi, rec, table):
-        f = rec.features[fi]
-        srec = f.extract(rec)
-        try: 
-            tsec = srec.seq.translate(table)
-            if tsec[-1] == '*': tsec = tsec[:-1]
-            fid = f.qualifiers.get('locus_tag', [None])[0]
-            if not fid: fid = '%s_f%d' % (rec.id, fi)
-            trec = SeqRecord(tsec,
-                             id=fid, name=rec.name,
-                             description=rec.description,
-                             annotations=rec.annotations)
-            pf = SeqFeature(FeatureLocation(0, len(trec)), 
-                            id=f.id, type='CDS',
-                            qualifiers=f.qualifiers)
-            trec.features.append(pf)
-        except Exception, e:
-            print e
-            raise RuntimeError('Unable to translate: %s' % str(srec.seq))
-        return trec 
-    
-    @staticmethod
-    @MultiprocessingBase.results_assembler
-    def _translation_assembler(index, tname, translations):
-        if tname and os.path.isfile(tname):
-            with roDict(tname) as db:
-                translations[index] = db['result']
-            cleanup_file(tname)
-            
-    def translate(self, rec, features=None, table='Standard', join=False, gap='X'*20):
-        if features is None: features = rec.features
-        translation = [None]*len(features)
-        work = self.Work()
-        work.prepare_jobs(self._translate_genes, features, None, rec, table)
-        work.set_assembler(self._translation_assembler, translation)
-        self.start_work(work)
-        if not self.wait(work): return None
-        if join: return cat_records(translation, gap=gap)
-        return translation
+def simple_feature(start, end, fid='<unknown id>', ftype='misc_feature'):
+    '''Make a SeqFeature starting at start and ending at end.
+    Indexes are zero-based, end is not included and if start > end
+    the feature is constructed on the reverse-complement strand.'''
+    if start > end: loc = FeatureLocation(end, start, -1)
+    else: loc = FeatureLocation(start, end, 1)
+    return SeqFeature(loc, type=ftype, id=fid)
