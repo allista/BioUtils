@@ -39,10 +39,12 @@ class SeqLoader(MultiprocessingBase):
         
     @staticmethod
     def load_file(filename, schema):
-        if not os.path.isfile(filename): return None
+        if not os.path.isfile(filename):
+            print 'No such file: %s' % filename 
+            return None
         try: return list(SeqIO.parse(filename, schema))
         except Exception, e:
-            print 'Unable to parse %s' % filename
+            print 'Unable to parse %s as %s' % (filename, schema)
             print e
             return None
         
