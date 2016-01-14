@@ -65,6 +65,7 @@ def data_mapper(func):
             except Exception, e:
                 print 'Exception in %s' % func.__name__
                 print e
+                abort_event.set()
                 queue.cancel_join_thread() 
                 break
             if item is None:
@@ -87,6 +88,7 @@ def data_mapper_method(func):
             except Exception, e:
                 print 'Exception in %s' % func.__name__
                 print e
+                abort_event.set()
                 queue.cancel_join_thread() 
                 break
             if item is None:
@@ -181,7 +183,7 @@ class Work(Sequence, Thread, AbortableBase):
         for j in xrange(num_jobs):
             queue = mp.Queue()
             job   = UProcess(target=mapper, args=(queue, self._abort_event, 
-                                                       in_queue, work)+args)
+                                                  in_queue, work)+args)
             job.daemon = self._daemonic
             self._jobs[j] = (job,queue)
             in_queue.put_nowait(None)
@@ -194,11 +196,13 @@ class Work(Sequence, Thread, AbortableBase):
     #end def
     
     def get_result(self):
-        assert self._assembler is not None, \
-        'Assembler should be set before calling get_results'
+        assert self._launched, 'Work should be launched before calling get_results'
+        assert self._assembler is not None, 'Assembler should be set before calling get_results'
         while self._jobs:
+            if self.aborted(): break
             finished_job = None
             for i,job in enumerate(self._jobs):
+                if self.aborted(): break
                 try: 
                     out = job[1].get(True, self._timeout)
                     if out is not None:

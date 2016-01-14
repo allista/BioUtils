@@ -36,7 +36,8 @@ class AbortableBase(object):
     
     def aborted(self):
         if self._aborted: return True
-        self._aborted = self._abort_event.is_set()
+        try: self._aborted = self._abort_event.is_set()
+        except IOError: self._aborted = True
         return self._aborted
     #end def
 #end class

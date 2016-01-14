@@ -90,12 +90,12 @@ class MPMain(object):
     def _main(self): pass
     
     def __call__(self, *args, **kwargs):
-        try: self._main()
+        try: ret = self._main()
         except:
             self.abort_event.set()
             traceback.print_exc()
             return 1
-        return 0
+        return ret or 0
 #end class
 
 
