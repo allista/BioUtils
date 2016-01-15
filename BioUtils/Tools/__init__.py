@@ -26,13 +26,17 @@ import tempfile
 import signal
 import traceback
 import logging
+from multiprocessing.queues import Queue
 from time import time, sleep
 from datetime import timedelta
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from multiprocessing import Event
 
-from BioUtils.Tools.tmpStorage import clean_tmp_files
+from .tmpStorage import clean_tmp_files
+from .AbortableBase import AbortableBase, aborted
+from .Output import OutIntercepter, OutQueue
+from .EchoLogger import EchoLogger
 
 re_type = type(re.compile(''))
 isatty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
@@ -43,7 +47,7 @@ def retry(func, error_msg, num_retries):
             result = func()
             break
         except Exception as e:
-            print(e)
+            print e
             if i == num_retries-1:
                 raise RuntimeError(error_msg)
     return result
@@ -96,87 +100,6 @@ class MPMain(object):
             traceback.print_exc()
             return 1
         return ret or 0
-#end class
-
-
-class OutIntercepter(object):
-    '''A file-like object which intercepts std-out/err'''
-    def __init__(self):
-        self._oldout = None
-        self._olderr = None
-    #end def
-    
-    def write(self, text): pass
-    
-    def flush(self): pass
-    
-    def __enter__(self):
-        self._oldout = sys.stdout
-        self._olderr = sys.stderr
-        sys.stdout = sys.stdout = self
-        return self
-    #end def
-    
-    def __exit__(self, _type, _value, _traceback):
-        if _type is not None and not SystemExit:
-            print(_value)
-            traceback.print_exception(_type, _value, _traceback, file=self._olderr)
-        sys.stdout = self._oldout
-        sys.stderr = self._olderr
-        return True
-    #end def
-#end class
-
-
-class EchoLogger(OutIntercepter):
-    '''Wrapper around logging module to capture stdout-err into a log file
-    while still print it to std'''
-
-    def __init__(self, name, level=logging.INFO):
-        OutIntercepter.__init__(self)
-        self._name      = name
-        self._log       = name+'.log'
-        self._level     = level
-        self._logger    = logging.getLogger(name)
-        self._handler   = logging.FileHandler(self._log, encoding='UTF-8')
-        self._formatter = logging.Formatter('[%(asctime)s] %(message)s')
-        #set log level
-        self._handler.setLevel(self._level)
-        self._logger.setLevel(self._level)
-        #assemble pipeline
-        self._handler.setFormatter(self._formatter)
-        self._logger.addHandler(self._handler)
-    #end def
-        
-    def __del__(self):
-        self._handler.close()
-        
-        
-    def __enter__(self):
-        OutIntercepter.__enter__(self)
-        self._logger.log(self._level, '=== START LOGGING ===')
-        return self
-    #end def
-    
-    def __exit__(self, _type, _value, _traceback):
-        if _type is not None and not SystemExit:
-            print(_value)
-            self._logger.error('Exception occured:', 
-                               exc_info=(_type, _value, _traceback))
-            traceback.print_exception(_type, _value, _traceback, file=self._olderr)
-        sys.stdout = self._oldout
-        sys.stderr = self._olderr
-        self._logger.log(self._level, '=== END LOGGING ===')
-        return True
-    #end def
-        
-    def write(self, text):
-        log_text = ' '.join(text.split())
-        if log_text: self._logger.log(self._level, log_text, exc_info=False)
-        self._oldout.write(text)
-    #end def
-    
-    def flush(self): self._oldout.flush()
 #end class
 
 
@@ -246,3 +169,12 @@ class ProgressCounter(Progress):
             self.step(self._count)
             self._count += 1
 #end class
+
+@contextmanager
+def simple_timeit(name=''):
+    try:
+        t0 = time()
+        yield 
+    finally:
+        print '%sElapsed: %s' % (name+' ' if name else '', timedelta(seconds=time()-t0))
+    
