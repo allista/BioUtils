@@ -22,6 +22,7 @@ Created on Dec 24, 2015
 
 import os, sys, re
 import tempfile, itertools
+from collections import OrderedDict
 
 from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
@@ -34,6 +35,24 @@ re_type = type(re.compile(''))
 isatty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
 
 class SeqLoader(MultiprocessingBase):
+    ext_re = re.compile(r'.*\.(\w+)$')
+    schemas   = {'fasta': re.compile(r'.*\.f(asta|as|a|aa|fn|rn|na)$'),
+                 'gb':    re.compile(r'.*\.g(bk|b)$'),
+                 'embl':  re.compile(r'.*\.embl$'),
+    }
+    
+    @classmethod
+    def get_ext(cls, filename):
+        m = cls.ext_re.match(filename)
+        return m.group(1) if m else ''
+        
+    @classmethod
+    def guess_schema(cls, filename):
+        for schema in cls.schemas:
+            if cls.schemas[schema].match(filename):
+                return schema
+        return cls.get_ext(filename)
+    
     def __init__(self, abort_event):
         super(SeqLoader, self).__init__(abort_event)
         
@@ -63,6 +82,73 @@ class SeqLoader(MultiprocessingBase):
     
     def load_files(self, files, schema):
         return list(itertools.chain(*[r for r in self.parallelize_work(1, self.load_file, files, schema) if r]))
+
+
+class SeqView(MultiprocessingBase):
+    def __init__(self, abort_event, *files):
+        super(SeqView, self).__init__(abort_event)
+        self._files = files
+        self._dbs = []
+        self._ids = OrderedDict()
+        for f in files: self._load_file(f)
+        
+    def __len__(self): return len(self._ids)
+    
+    def __iter__(self): return (self._dbs[self._ids[key]][key] for key in self._ids)
+    
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self[self._ids.keys()[key]]
+        if isinstance(key, str):
+            return self._dbs[self._ids[key]][key]
+        
+    def get(self, key, default=None):
+        try: return self[key]
+        except: return default
+    
+    def iterkeys(self): return self._ids.iterkeys()
+    def keys(self): return self._ids.keys()
+    
+    def itervalues(self, keys=None):
+        if not keys: return self.__iter__()
+        return (self[k] for k in keys)
+        
+    def values(self, keys=None):
+        return list(self.itervalues(keys))
+    
+    def iteritems(self):
+        for k in self.iterkeys(): yield (k, self[k])
+        
+    def items(self): return dict(self.iteritems())
+    
+    def length(self, key): return len(self[key])
+    
+    def lengths(self, keys=None):
+        if not keys: keys = self.keys()
+        return dict(self.parallelize_work(1, lambda k: (k, len(self.get(k, ''))), keys))
+    
+    def iterlengths(self, keys=None):
+        if not keys: keys = self.keys()
+        for k in keys: yield (k, len(self.get(k, '')))
+    
+    def __nonzero__(self): return bool(self._dbs)
+    
+    def _load_file(self, filename):
+        if not os.path.isfile(filename):
+            print 'No such file: %s' % filename 
+            return
+        schema = SeqLoader.guess_schema(filename)
+        if not schema:
+            print 'Unable to guess schema from filename: %s' % filename
+            return
+        try:
+            db = SeqIO.index(filename, schema)
+            idx = len(self._dbs)
+            self._ids.update((sid, idx) for sid in db.keys())
+            self._dbs.append(db)
+        except Exception, e:
+            print 'Unable to parse %s as %s' % (filename, schema)
+            print e
 
     
 class Translator(MultiprocessingBase):
