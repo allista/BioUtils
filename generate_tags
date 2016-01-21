@@ -29,8 +29,6 @@ import argparse
 from Bio import SeqIO
 
 from BioUtils.TagsGenerator import generate_tags
-from BioUtils.Tools import print_exception
-
 
 if __name__ == '__main__':
     #parse command line arguments
@@ -83,7 +81,7 @@ if __name__ == '__main__':
                 sequences.append(record)
         except Exception, e:
             print '\nError while parsing sequences:'
-            print_exception(e)
+            print e
             print '\nFile %s will be ignored.' % filename
             continue
     if not sequences:
@@ -119,7 +117,7 @@ if __name__ == '__main__':
                 output_file = open(args.output, 'wb')
             except IOError, e:
                 print '\nUnable to open %s for writing.' % output_file
-                print_exception(e)
+                print e
                 print '\nOutput to stdout instead:'
                 csv_writer  = csv.writer(sys.stdout, delimiter='\t', quotechar='"')
                 csv_writer.writerows(tagged_sequences_csv)

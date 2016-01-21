@@ -22,14 +22,15 @@ Created on Dec 24, 2015
 
 import os, sys, re
 import tempfile, itertools
-from collections import OrderedDict
+from copy import deepcopy
 
 from Bio import SeqIO
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
 
-from BioUtils.Tools.Multiprocessing import MultiprocessingBase
-from BioUtils.Tools.tmpStorage import shelf_result, roDict, cleanup_file
+from .Tools.Multiprocessing import MultiprocessingBase
+from .Tools.tmpStorage import shelf_result, roDict, register_tmp_file, cleanup_file
+from .Tools import mktmp_name, safe_unlink
 
 re_type = type(re.compile(''))
 isatty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
@@ -84,30 +85,88 @@ class SeqLoader(MultiprocessingBase):
         return list(itertools.chain(*[r for r in self.parallelize_work(1, self.load_file, files, schema) if r]))
 
 
-class SeqView(MultiprocessingBase):
-    def __init__(self, abort_event, *files):
-        super(SeqView, self).__init__(abort_event)
-        self._files = files
-        self._dbs = []
-        self._ids = OrderedDict()
-        for f in files: self._load_file(f)
+class SeqView(object):
+    '''Uses Bio.SeqIO.index_db with a temporary database to create a mixed
+    dict/list picklable read-only SeqRecord container.
+    '''
+    
+    def __init__(self):
+        self.dbname = None
+        self.db     = None
+        self._ids   = []
+        self.tmp_db = False
+        self.master = False
+                
+    def load(self, files, dbname=None):
+        self.close()
+        valid = []
+        schemas = set()
+        for filename in files:
+            if not os.path.isfile(filename):
+                print 'No such file: %s' % filename 
+                continue
+            schema = SeqLoader.guess_schema(filename)
+            if not schema:
+                print 'Unable to guess schema from filename: %s' % filename
+                continue
+            schemas.add(schema)
+            valid.append(filename)
+        if len(schemas) != 1:
+            raise ValueError('All files should be of the same type, but %d types found: %s' % (len(schemas), schemas))
+        if not valid:
+            print 'No valid files provided.'
+            return
+        if not dbname:
+            self.dbname = mktmp_name('_SeqView.db')
+            safe_unlink(self.dbname)
+            self.tmp_db = True
+        else: self.dbname = dbname
+        self.db = SeqIO.index_db(self.dbname, valid, schemas.pop())
+        self._ids = tuple(sorted(self.db.keys()))
+        self.master = True
+
+    def reload(self, dbname):
+        self.close()
+        self.dbname = dbname
+        self.db = SeqIO.index_db(self.dbname)
+        self._ids = sorted(self.db.keys())
+        self.tmp_db = False
+        self.master = True
+        
+    def close(self):
+        if self.master: 
+            self.db.close()
+            self.master = False
+        self.db = None
+        self._ids = []
+        if self.dbname and self.tmp_db:
+            cleanup_file(self.dbname)
+            self.dbname = None
+            self.tmp_db = False
+            
+    def __del__(self): self.close()
+            
+    def __nonzero__(self): return bool(self._ids)
         
     def __len__(self): return len(self._ids)
     
-    def __iter__(self): return (self._dbs[self._ids[key]][key] for key in self._ids)
+    def __iter__(self): return (self.db[key] for key in self._ids)
     
     def __getitem__(self, key):
         if isinstance(key, int):
-            return self[self._ids.keys()[key]]
+            return self[self._ids[key]]
         if isinstance(key, str):
-            return self._dbs[self._ids[key]][key]
+            return self.db[key]
+        if isinstance(key, slice):
+            return self.subview(self._ids[key])
         
     def get(self, key, default=None):
         try: return self[key]
         except: return default
     
-    def iterkeys(self): return self._ids.iterkeys()
-    def keys(self): return self._ids.keys()
+    def iterkeys(self): return self._ids.__iter__()
+    def keys(self): return self._ids
+    def key(self, index): return self._ids[index]
     
     def itervalues(self, keys=None):
         if not keys: return self.__iter__()
@@ -120,35 +179,28 @@ class SeqView(MultiprocessingBase):
         for k in self.iterkeys(): yield (k, self[k])
         
     def items(self): return dict(self.iteritems())
+        
+    def subview(self, keys):
+        v = SeqView()
+        v.dbname = self.dbname
+        v.db = self.db
+        v.tmp_db = False
+        v._ids = keys
+        return v
     
-    def length(self, key): return len(self[key])
+    def __deepcopy__(self, memo):
+        return _unpickle_SeqView(self.dbname, deepcopy(self._ids, memo))
     
-    def lengths(self, keys=None):
-        if not keys: keys = self.keys()
-        return dict(self.parallelize_work(1, lambda k: (k, len(self.get(k, ''))), keys))
-    
-    def iterlengths(self, keys=None):
-        if not keys: keys = self.keys()
-        for k in keys: yield (k, len(self.get(k, '')))
-    
-    def __nonzero__(self): return bool(self._dbs)
-    
-    def _load_file(self, filename):
-        if not os.path.isfile(filename):
-            print 'No such file: %s' % filename 
-            return
-        schema = SeqLoader.guess_schema(filename)
-        if not schema:
-            print 'Unable to guess schema from filename: %s' % filename
-            return
-        try:
-            db = SeqIO.index(filename, schema)
-            idx = len(self._dbs)
-            self._ids.update((sid, idx) for sid in db.keys())
-            self._dbs.append(db)
-        except Exception, e:
-            print 'Unable to parse %s as %s' % (filename, schema)
-            print e
+    def __reduce__(self):
+        return _unpickle_SeqView, (self.dbname, self._ids)
+
+def _unpickle_SeqView(dbname, ids):
+    v = SeqView()
+    v.dbname = dbname
+    v.db = SeqIO.index_db(dbname)
+    v.master = True
+    v._ids = ids
+    return v
 
     
 class Translator(MultiprocessingBase):
@@ -209,10 +261,11 @@ def load_files(abort_event, filenames, schema):
     return loader.load_files(filenames, schema)
 
 
-def mktmp_fasta(rec):
+def mktmp_fasta(rec, register=True):
     fd, fn = tempfile.mkstemp('.fas', 'wb')
     f = os.fdopen(fd, 'wb')
     SeqIO.write(rec, f, 'fasta')
+    if register: register_tmp_file(fn)
     f.close()
     return fn
 #end def
@@ -276,3 +329,6 @@ def simple_feature(start, end, fid='<unknown id>', ftype='misc_feature'):
     if start > end: loc = FeatureLocation(end, start, -1)
     else: loc = FeatureLocation(start, end, 1)
     return SeqFeature(loc, type=ftype, id=fid)
+
+def pretty_rec_name(rec):
+    return rec.annotations.get('source', rec.description or rec.id)

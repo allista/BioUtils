@@ -42,7 +42,7 @@ def sig_handler(signal, frame):
 
 if __name__ == '__main__':
     from multiprocessing import Event
-    from BioUtils.Tools import user_message
+    from BioUtils.Tools.Output import user_message
     from BioUtils.SeqUtils import load_files
     _pid = os.getpid()
     #setup signal handler

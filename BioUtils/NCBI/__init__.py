@@ -37,7 +37,8 @@ from Bio import Entrez
 from BioUtils.Tools.Multiprocessing import MultiprocessingBase
 from BioUtils.Tools.tmpStorage import shelf_result, roDict
 
-from BioUtils.Tools import user_message, Progress, ProgressCounter, retry
+from BioUtils.Tools import retry
+from BioUtils.Tools.Output import user_message, Progress, ProgressCounter
 from BioUtils.SeqUtils import mktmp_fasta, cat_records, Translator
 
 class BatchEntrez(object):
@@ -455,7 +456,7 @@ class BlastCLI(MultiprocessingBase):
         shuffle(pairs)
         @MultiprocessingBase.data_mapper
         @shelf_result
-        def _worker(qs, queries, subjects, subject_locs):
+        def worker(qs, queries, subjects, subject_locs):
             query = queries[qs[0]]
             subject = subjects[qs[1]]
             if query is None or subject is None: return None
@@ -469,14 +470,14 @@ class BlastCLI(MultiprocessingBase):
             elif 'subject_loc' in kwargs: del kwargs['subject_loc']
             return BlastCLI.s2s_blast(query, subject, evalue, command, **kwargs)
         @MultiprocessingBase.results_assembler
-        def _assembler(index, hsps, results, pairs, prg):
+        def assembler(index, hsps, results, pairs, prg):
             qs = pairs[index]
             results[qs[0]][qs[1]] = hsps
             prg.count()
         with ProgressCounter('Performing multiple %s searches:'%command, len(pairs)) as prg:
             work = self.Work()
-            work.prepare_jobs(_worker, pairs, None, queries, subjects, subject_locs)
-            work.set_assembler(_assembler, results, pairs, prg)
+            work.prepare_jobs(worker, pairs, None, queries, subjects, subject_locs)
+            work.set_assembler(assembler, results, pairs, prg)
             self.start_work(work)
             if not self.wait(work): return None
         return results
@@ -656,11 +657,11 @@ class BlastCLI(MultiprocessingBase):
             work.prepare_jobs(self._find_features_by_hsps, pairs,
                               None, stranslations, blast_results)
             @MultiprocessingBase.results_assembler
-            def _assembler(index, result, blast_results, pairs, prg):
+            def assembler(index, result, blast_results, pairs, prg):
                 qs = pairs[index]
                 blast_results[qs[0]][qs[1]] = result
                 prg.count()
-            work.set_assembler(_assembler, blast_results, pairs, prg)
+            work.set_assembler(assembler, blast_results, pairs, prg)
             self.start_work(work)
             if not self.wait(work): return None
         return zip((reference.features[f] for f in features[0]), blast_results)

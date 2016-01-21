@@ -39,7 +39,8 @@ from Bio.SeqFeature import SeqFeature, FeatureLocation
 from BioUtils.Tools.Multiprocessing import MultiprocessingBase, cpu_count
 from BioUtils.Tools.tmpStorage import shelf_result, roDict
 
-from BioUtils.Tools import user_message, Progress, ProgressCounter, retry, mktmp_name
+from BioUtils.Tools import retry, mktmp_name
+from BioUtils.Tools.Output import user_message, Progress, ProgressCounter
 from BioUtils.SeqUtils import mktmp_fasta, cat_records, Translator, get_indexes_of_genes
 from BioUtils.HMMER3.Applications import HMMSearchCommandline
 
@@ -147,7 +148,7 @@ def sig_handler(signal, frame):
 
 if __name__ == '__main__':
     from multiprocessing import Event
-    from BioUtils.Tools import user_message
+    from BioUtils.Tools.Output import user_message
     from BioUtils.SeqUtils import load_files, load_dir
     _pid = os.getpid()
     #setup signal handler

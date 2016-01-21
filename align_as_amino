@@ -37,7 +37,6 @@ try:
 except:
     print "The BioPython must be installed in your system for this script to work."
     sys.exit(1)
-from BioUtils.Tools import print_exception
 from BioUtils.Alignment import Alignment
 
 #parse command line arguments
@@ -81,7 +80,7 @@ and FASTA files have .fa or .fasta extension."
             sequences[record.id] = record
     except Exception,e:
         print 'align_as_amino.parse sequence:'
-        print_exception(e)
+        print e
         sys.exit(1)
     if len(sequences) < 2:
         print "You should provide at least 2 sequences to make an alignment."
@@ -100,5 +99,5 @@ try:
     print "\nOutput written to "+out_clustalw
 except Exception,e:
     print 'align_as_amino.output alignment:'
-    print_exception(e)
+    print e
     sys.exit(1)

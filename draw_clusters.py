@@ -22,7 +22,7 @@ Created on Dec 11, 2015
 '''
 
 import os, re
-from BioUtils.Tools import isatty
+from BioUtils.Tools.Output import isatty
 from BioUtils.SeqUtils import load_files
 from BioUtils.NCBI import BlastCLI
 

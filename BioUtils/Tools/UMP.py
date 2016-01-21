@@ -22,9 +22,12 @@ Created on Mar 2, 2014
 @author: Allis Tauri <allista@gmail.com>
 '''
 
-import signal
+import signal 
 import multiprocessing as mp
 from multiprocessing.managers import BaseManager
+
+from .Debug import Pstats #test
+
 
 def ignore_interrupt():
     signal.signal(signal.SIGINT,  signal.SIG_IGN)
@@ -44,7 +47,7 @@ class UProcess(mp.Process):
 class UManager(BaseManager):
     '''Multiprocessing Manager that ignores interrupt, term and quit signals'''
     def start(self, initializer=ignore_interrupt, initargs=()):
-        BaseManager.start(self, initializer=initializer, initargs=initargs)
+        Pstats(self.__class__.__name__)(BaseManager.start)(self, initializer=initializer, initargs=initargs)#test
 #end class
 
 
