@@ -81,3 +81,7 @@ def raise_tb_on_error(func):
         except: raise_tb()
     copy_name(wrapper, func)
     return wrapper
+
+def print_file(filename, _open=open):
+    with _open(filename) as inp:
+        print inp.read()
