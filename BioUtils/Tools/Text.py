@@ -25,11 +25,9 @@ Created on Jun 30, 2012
 from math import log
 import random
 import string
-from textwrap import TextWrapper
 from time import ctime
 
 text_width = 80
-wrapper = TextWrapper(width=text_width, expand_tabs=False)
 
 def random_text(length):
     return ''.join(random.choice(string.ascii_uppercase + string.digits) 
@@ -43,21 +41,33 @@ def time_hr(symbol='#'):
 
 def wrap_text(text, width=None):
     #replace intermediate whitespaces with single spaces
-#    text = ' '.join(text.split())
-    #wrap text
-    if width:
-        old_width = wrapper.width
-        wrapper.width = width
-        wrapped_text  = wrapper.fill(text)
-        wrapper.width = old_width
-    else: wrapped_text = wrapper.fill(text)
-    return wrapped_text+'\n'
-
+    if not width: width = text_width
+    boundary = width-1
+    curw = 0
+    out = ''
+    for word in text.split():
+        wl = len(word)
+        if curw+wl > boundary:
+            if curw:
+                out += '\n'
+                curw = 0
+        while not curw and wl > width:
+            out += word[:boundary]
+            out += '-\n'
+            word = word[boundary:]
+            wl -= boundary
+        if curw:
+            out += ' '
+            curw += 1
+        out += word
+        curw += wl
+    out += '\n'
+    return out
+            
 def line_by_line(texts, widths, divider='|', filler=' ', j_down=False, j_center=False):
-    if len(texts) != len(widths):
-        raise ValueError('StringTools.line_by_line: for each text a line width '
-                         'should be provided')
-    _texts = [wrap_text(t, widths[w]-1)[:-1].splitlines() for w,t in enumerate(texts)]
+    assert len(texts) == len(widths), \
+    'line_by_line: for each text a line width should be provided'
+    _texts = tuple(wrap_text(t, widths[w]-1)[:-1].splitlines() for w,t in enumerate(texts))
     _lines = max(len(t) for t in _texts)
     output_text = ''
     for l in xrange(_lines):
