@@ -1128,5 +1128,4 @@ class Main(MPMain):
         return 0
 
 if __name__ == '__main__':
-    main = Main(os.getpid())
-    sys.exit(main())
+    Main()

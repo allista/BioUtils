@@ -6,7 +6,7 @@ Created on Jan 15, 2016
 from BioUtils.Tools.Multiprocessing import MPMain
 from BioUtils.Tools.Output import simple_timeit
 
-class _Main(MPMain):
+class Test(MPMain):
     large_seqdb = u'/home/allis/Downloads/Local/Bioinformatics/SILVA/SILVA_123_SSURef_Nr99_tax_silva.fasta'
     #silva.gold.ng.fasta'#nogap.archaea.fasta' #SILVA_123_SSURef_Nr99_tax_silva.fasta'
     def _main(self):
@@ -40,5 +40,4 @@ class _Main(MPMain):
         print 'Done'
 
 if __name__ == '__main__':
-    main =_Main()
-    main()
+    Test()

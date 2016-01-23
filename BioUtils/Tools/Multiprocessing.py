@@ -362,6 +362,7 @@ def parallelize_both(abort_event, daemonic, timeout, funcs, data, *args, **kwarg
 #decorators and managers
 from .tmpStorage import shelf_result
 from .UMP import FuncManager
+import sys
 
 Parallelizer = FuncManager('Parallelizer', 
                            (parallelize_work,
@@ -372,12 +373,13 @@ Parallelizer = FuncManager('Parallelizer',
                             shelf_result(parallelize_both)))
 
 class MPMain(object):
-    def __init__(self, pid=os.getpid()):
+    def __init__(self, pid=os.getpid(), run_immidiately=True):
         self.pid = pid
         self.abort_event = mp.Event()
         signal.signal(signal.SIGINT,  self.sig_handler)
         signal.signal(signal.SIGTERM, self.sig_handler)
         signal.signal(signal.SIGQUIT, self.sig_handler)
+        if run_immidiately: self()
         
     def sig_handler(self, signal, frame):
         if self.pid != os.getpid(): return
@@ -393,8 +395,8 @@ class MPMain(object):
         except:
             self.abort_event.set()
             traceback.print_exc()
-            return 1
-        return ret or 0
+            sys.exit(1)
+        sys.exit(ret or 0)
 #end class
 
 #tests

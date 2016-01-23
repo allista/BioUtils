@@ -9,8 +9,8 @@ Created on Jan 6, 2016
 
 from Bio.NeuralNetwork.Gene.Schema import SchemaFinder
 from BioUtils.SeqUtils import load_files, load_dir, simple_feature
-from BioUtils.Tools import MPMain
-import sys, csv
+from BioUtils.Tools.Multiprocessing import MPMain
+import csv
 
 class Main(MPMain):
     genomedir = u'/home/allis/Dropbox/Science/Микра/Thermococcus/sequence/GenBank/Thermococcus/'
@@ -45,5 +45,4 @@ class Main(MPMain):
                 writer.writerow((pi, repo.count(pi)))
 
 if __name__ == '__main__':
-    main = Main()
-    sys.exit(main())
+    Main()
