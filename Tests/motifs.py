@@ -43,6 +43,8 @@ class Main(MPMain):
             writer.writerow(('motif', 'count')) 
             for pi in repo.get_all():
                 writer.writerow((pi, repo.count(pi)))
+                
+    def test(self): self(sys_exit=False)
 
 if __name__ == '__main__':
-    Main()
+    Main(run=True)

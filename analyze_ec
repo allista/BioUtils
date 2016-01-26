@@ -1128,4 +1128,4 @@ class Main(MPMain):
         return 0
 
 if __name__ == '__main__':
-    Main()
+    Main(run=True)

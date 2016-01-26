@@ -160,12 +160,11 @@ class ClusterProject(MultiprocessingBase):
             c2 = self.clusters[cid2]
             print '%s vs %s' % (cid1, cid2)
             work = self.Work()
-            work.prepare_jobs(self._blast_feature, 
+            work.start_work(self._blast_feature, 
                               [f for f in c1.features if f.type == 'CDS'], None, 
                               c1, c2, features1, features2, evalue, max_rlen)
-            work.set_assembler(self._compose_crosslink, features1, features2)
-            self.start_work(work)
-            self.wait(work)
+            work.assemble(self._compose_crosslink, features1, features2)
+            work.wait()
             
     def get_clusters(self, genomes_dir, tag, force = False, print_ids = False):
         print 'Extracting clusters from provided GenBank files.'

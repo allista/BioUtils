@@ -476,10 +476,9 @@ class BlastCLI(MultiprocessingBase):
             prg.count()
         with ProgressCounter('Performing multiple %s searches:'%command, len(pairs)) as prg:
             work = self.Work()
-            work.prepare_jobs(worker, pairs, None, queries, subjects, subject_locs)
-            work.set_assembler(assembler, results, pairs, prg)
-            self.start_work(work)
-            if not self.wait(work): return None
+            work.start_work(worker, pairs, None, queries, subjects, subject_locs)
+            work.assemble(assembler, results, pairs, prg)
+            if not work.wait(): return None
         return results
     
     @staticmethod
@@ -654,16 +653,15 @@ class BlastCLI(MultiprocessingBase):
         pairs = list(itertools.product(xrange(len(translations[0])), xrange(len(stranslations))))
         with ProgressCounter('Searching for genes in subjects that overlap with top blast hits...', len(pairs)) as prg:
             work = self.Work()
-            work.prepare_jobs(self._find_features_by_hsps, pairs,
-                              None, stranslations, blast_results)
+            work.start_work(self._find_features_by_hsps, pairs,
+                            None, stranslations, blast_results)
             @MultiprocessingBase.results_assembler
             def assembler(index, result, blast_results, pairs, prg):
                 qs = pairs[index]
                 blast_results[qs[0]][qs[1]] = result
                 prg.count()
-            work.set_assembler(assembler, blast_results, pairs, prg)
-            self.start_work(work)
-            if not self.wait(work): return None
+            work.assemble(assembler, blast_results, pairs, prg)
+            if not work.wait(): return None
         return zip((reference.features[f] for f in features[0]), blast_results)
     
     @staticmethod

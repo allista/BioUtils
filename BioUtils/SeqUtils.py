@@ -243,10 +243,9 @@ class Translator(MultiprocessingBase):
         if features is None: features = rec.features
         translation = [None]*len(features)
         work = self.Work()
-        work.prepare_jobs(self._translate_genes, features, None, rec, table)
-        work.set_assembler(self._translation_assembler, translation)
-        self.start_work(work)
-        if not self.wait(work): return None
+        work.start_work(self._translate_genes, features, None, rec, table)
+        work.assemble(self._translation_assembler, translation)
+        if not work.wait(): return None
         if join: return cat_records(translation, gap=gap)
         return translation
     

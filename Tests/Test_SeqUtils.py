@@ -38,6 +38,8 @@ class Test(MPMain):
             assert res1 == res2
             print '-'*80
         print 'Done'
+        
+    def test(self): self(sys_exit=False)
 
 if __name__ == '__main__':
-    Test()
+    Test(run=True)

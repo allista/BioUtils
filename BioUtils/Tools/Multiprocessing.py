@@ -23,6 +23,7 @@ Created on Mar 6, 2013
 import errno
 import os, traceback, signal
 import multiprocessing as mp
+from multiprocessing.queues import Queue
 from time import sleep
 from collections import Sequence
 from threading import Thread
@@ -33,7 +34,7 @@ from functools import partial
 from .UMP import UProcess
 from .tmpStorage import clean_tmp_files
 from .AbortableBase import AbortableBase, aborted
-from .Debug import Pstats, raise_tb, raise_tb_on_error
+from .Debug import raise_tb, raise_tb_on_error
 
 cpu_count = mp.cpu_count()
 
@@ -64,7 +65,6 @@ def worker_method(func):
     
 def data_mapper(func):
     func = raise_tb_on_error(func)
-    @Pstats('data_mapper(%s)' % str(func))#test
     def mapper(queue, abort_event, in_queue, data, *args, **kwargs):
         if kwargs.get('copy_data', False): data = deepcopy(data)
         init = kwargs.get('init_args', None)
@@ -172,40 +172,43 @@ class Work(Sequence, Thread, AbortableBase):
     
     def add_job(self, job, queue): self._jobs.append(Job(job, queue))
 
-    def set_assembler(self, assembler, *args):
-        assert hasattr(assembler, '__call__'), 'Assembler should be a callable'
-        self.assembler = assembler
-        self._assembler_args      = args
-    #end def
-    
     def set_jobs(self, jobs): self._jobs = jobs
-        
-    def prepare_jobs(self, worker, work, num_jobs, *args, **kwargs):
-        '''work should be and indexable sequence''' 
-        wlen = len(work)
-        if not wlen: return
-        if self._counter is not None: self._counter.set_work(wlen)
-        #determine number of jobs to launch
-        if not num_jobs: num_jobs = cpu_count
-        #prepare processes
-        in_queue = mp.Queue()
-        for i in xrange(wlen): in_queue.put_nowait(i)
-        #prepare jobs
-        self._jobs = [None]*num_jobs
-        for j in xrange(num_jobs):
-            queue = mp.Queue()
-            job   = UProcess(target=worker, args=(queue, self._abort_event, 
-                                                  in_queue, work)+args, kwargs=kwargs)
-            job.daemon = self._daemonic
-            self._jobs[j] = Job(job,queue)
-            in_queue.put_nowait(None)
-    #end def
-    
-    def launch(self):
+
+    def start_jobs(self):
         if self._launched: return
         for j in self._jobs: j.start()
         self._launched = True
     #end def
+
+    def start_work(self, worker, work, num_jobs, *args, **kwargs):
+        '''work should be and indexable sequence''' 
+        wlen = len(work)
+        if not wlen: return
+        if self._counter is not None: self._counter.set_work(wlen)
+        #determine number of jobs to start
+        if not num_jobs: num_jobs = cpu_count
+        #prepare jobs
+        in_queue = Queue(wlen+num_jobs)
+        self._jobs = [None]*num_jobs
+        for j in xrange(num_jobs):
+            queue = Queue()
+            job   = UProcess(target=worker, args=(queue, self._abort_event, 
+                                                  in_queue, work)+args, kwargs=kwargs)
+            job.daemon = self._daemonic
+            self._jobs[j] = Job(job,queue)
+        self.start_jobs()
+        for i in xrange(wlen): in_queue.put(i, False)
+        for j in xrange(num_jobs): in_queue.put(None, False)
+    #end def
+    
+    def set_assembler(self, assembler, *args):
+        assert hasattr(assembler, '__call__'), 'Assembler should be a callable'
+        self.assembler = assembler
+        self._assembler_args = args
+    
+    def assemble(self, assembler, *args):
+        self.set_assembler(assembler, *args)
+        self.get_nowait()
     
     def get_result(self):
         assert self._launched, 'Work should be launched before calling get_results'
@@ -247,9 +250,7 @@ class Work(Sequence, Thread, AbortableBase):
     get_nowait = Thread.start
     
     def run(self):
-        try: 
-            self.launch()
-            self.get_result()
+        try: self.get_result()
         #Ctrl-C
         #EOF means that target activity was terminated in the Manager process
         except (KeyboardInterrupt, EOFError): return
@@ -274,7 +275,7 @@ class MultiprocessingBase(AbortableBase):
 
     #aliases
     _Process = staticmethod(UProcess)
-    _Queue   = staticmethod(mp.Queue)
+    _Queue   = staticmethod(Queue)
     
     worker                  = staticmethod(worker)
     worker_method           = staticmethod(worker_method)
@@ -299,26 +300,24 @@ class MultiprocessingBase(AbortableBase):
     def Work(self, jobs=None, timeout=1, **kwargs): 
         return Work(self._abort_event, jobs, timeout, self._daemonic, **kwargs)
     
-    def start_work(self, *work):
-        for w in work: w.launch()
+    def start_jobs(self, *work):
+        for w in work: w.start_jobs()
+
+    def get_nowait(self, *work):
+        for w in work: w.get_nowait()
         
     def wait(self, *work):
-        for w in work: w.get_nowait()
         ret = True
         for w in work: ret &= w.wait()
         return ret
-    #end def
-    
         
     def parallelize(self, timeout, worker, work, *args, **kwargs):
         #prepare and start jobs
         w = self.Work(timeout=timeout, **kwargs)
-        w.prepare_jobs(worker, work, None, *args, **kwargs)
-        w.launch()
+        w.start_work(worker, work, None, *args, **kwargs)
         #allocate result container, get result
         result = [None]*len(work)
-        w.set_assembler(ordered_results_assembler, result)
-        w.get_nowait()
+        w.assemble(ordered_results_assembler, result)
         #if aborted, return None
         if not w.wait(): return None
         return result
@@ -362,6 +361,7 @@ def parallelize_both(abort_event, daemonic, timeout, funcs, data, *args, **kwarg
 #decorators and managers
 from .tmpStorage import shelf_result
 from .UMP import FuncManager
+from multiprocessing import Manager
 import sys
 
 Parallelizer = FuncManager('Parallelizer', 
@@ -373,13 +373,18 @@ Parallelizer = FuncManager('Parallelizer',
                             shelf_result(parallelize_both)))
 
 class MPMain(object):
-    def __init__(self, pid=os.getpid(), run_immidiately=True):
+    def __init__(self, pid=os.getpid(), run=False):
         self.pid = pid
-        self.abort_event = mp.Event()
+        self.mgr = Manager()
+        self.abort_event = self.mgr.Event()
         signal.signal(signal.SIGINT,  self.sig_handler)
         signal.signal(signal.SIGTERM, self.sig_handler)
         signal.signal(signal.SIGQUIT, self.sig_handler)
-        if run_immidiately: self()
+        if run: self()
+        
+    def __del__(self):
+        try: self.mgr.stop()
+        except: pass
         
     def sig_handler(self, signal, frame):
         if self.pid != os.getpid(): return
@@ -390,37 +395,13 @@ class MPMain(object):
     
     def _main(self): pass
     
-    def __call__(self, *args, **kwargs):
+    def __call__(self, sys_exit=True, *args, **kwargs):
         try: ret = self._main()
         except:
             self.abort_event.set()
             traceback.print_exc()
-            sys.exit(1)
-        sys.exit(ret or 0)
+            if sys_exit: sys.exit(1)
+            else: return 1
+        if sys_exit: sys.exit(ret or 0)
+        else: return 0
 #end class
-
-#tests
-if __name__ == '__main__':
-    abort_event = mp.Event()
-    
-    class Test(MultiprocessingBase):
-        def __init__(self, abort_event):
-            MultiprocessingBase.__init__(self, abort_event)
-            self._a = 5
-            
-        def _method(self, i):
-            return self._a+abs(i)
-        
-        def map_data(self, data):
-            return self.parallelize_work(1, self._method, data)
-        
-        def map_functions(self, funcs, *args):
-            return self.parallelize_functions(1, funcs, *args)
-        
-        def map_both(self, funcs, data):
-            return self.parallelize_both(1, funcs, data)
-    
-    t = Test(abort_event)
-    print t.map_data([-1, -2, -3, -4, -5, -6, -7, -8])
-    print t.map_functions((abs, lambda x: x**2), -2)
-    print t.map_both((abs, lambda x: x**2), (-2, 4))
