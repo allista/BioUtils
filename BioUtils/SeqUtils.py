@@ -25,8 +25,10 @@ import tempfile, itertools
 from copy import deepcopy
 
 from Bio import SeqIO
+from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
+from Bio.Alphabet import generic_alphabet
 
 from .Tools.Multiprocessing import MultiprocessingBase
 from .Tools.tmpStorage import shelf_result, roDict, register_tmp_file, cleanup_file
@@ -57,18 +59,19 @@ class SeqLoader(MultiprocessingBase):
     def __init__(self, abort_event):
         super(SeqLoader, self).__init__(abort_event)
         
-    @staticmethod
-    def load_file(filename, schema):
+    @classmethod
+    def load_file(cls, filename, schema=None):
         if not os.path.isfile(filename):
             print 'No such file: %s' % filename 
             return None
+        if not schema: schema = cls.guess_schema(filename) 
         try: return list(SeqIO.parse(filename, schema))
         except Exception, e:
             print 'Unable to parse %s as %s' % (filename, schema)
             print e
             return None
         
-    def load_dir(self, dirname, schema, namefilter=None):
+    def load_dir(self, dirname, schema=None, namefilter=None):
         if isinstance(namefilter, str):
             namefilter = re.compile(namefilter)
         if isinstance(namefilter, re_type):
@@ -81,8 +84,8 @@ class SeqLoader(MultiprocessingBase):
                  if os.path.isfile(f)]
         return self.load_files(files, schema)
     
-    def load_files(self, files, schema):
-        return list(itertools.chain(*[r for r in self.parallelize_work(1, self.load_file, files, schema) if r]))
+    def load_files(self, files, schema=None):
+        return list(itertools.chain.from_iterable(r for r in self.parallelize_work(1, self.load_file, files, schema) if r))
 
 
 class SeqView(object):
@@ -250,12 +253,12 @@ class Translator(MultiprocessingBase):
         return translation
     
     
-def load_dir(abort_event, dirname, schema, namefilter=None):
+def load_dir(abort_event, dirname, schema=None, namefilter=None):
     loader = SeqLoader(abort_event)
     return loader.load_dir(dirname, schema, namefilter)
 
 
-def load_files(abort_event, filenames, schema):
+def load_files(abort_event, filenames, schema=None):
     loader = SeqLoader(abort_event)
     return loader.load_files(filenames, schema)
 
@@ -320,6 +323,9 @@ def get_indexes_of_genes(rec):
             print rec.id, rec.description
             return None
     return features
+
+def simple_rec(seq, sid, name='', description=''):
+    return SeqRecord(Seq(seq, generic_alphabet), id=sid, name=name, description=description)
 
 def simple_feature(start, end, fid='<unknown id>', ftype='misc_feature'):
     '''Make a SeqFeature starting at start and ending at end.
