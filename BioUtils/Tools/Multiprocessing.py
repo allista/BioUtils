@@ -397,6 +397,9 @@ class MPMain(object):
     
     def __call__(self, sys_exit=True, *args, **kwargs):
         try: ret = self._main()
+        except SystemExit, e:
+            if sys_exit: sys.exit(e.code)
+            else: return e.code
         except:
             self.abort_event.set()
             traceback.print_exc()
