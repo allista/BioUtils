@@ -143,3 +143,6 @@ def format_quantity(quantity, unit='U'):
     #if everything fails for some unknown reason
     return 'N/A  %s' % unit
 #end def
+
+def strip_ext(name):
+    return name[:name.rfind('.')]
