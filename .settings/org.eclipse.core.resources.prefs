@@ -26,4 +26,5 @@ encoding/parse_chrom=utf-8
 encoding/rename_genomes=utf-8
 encoding/seqconv=utf-8
 encoding/setup.py=utf-8
+encoding/split_consensus=utf-8
 encoding/split_fasta=utf-8

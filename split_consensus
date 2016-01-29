@@ -1,0 +1,72 @@
+#!/usr/bin/python
+# coding=utf-8
+#
+# Copyright (C) 2015 Allis Tauri <allista@gmail.com>
+# 
+# indicator_gddccontrol is free software: you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+# 
+# indicator_gddccontrol is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+# See the GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along
+# with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+'''
+Created on Jan 27, 2016
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import os
+import re
+import math
+import argparse
+
+from BioUtils.SeqUtils import SeqLoader, simple_rec, safe_write, pretty_rec_name
+from BioUtils.Tools.Multiprocessing import MPMain, parallelize_work
+
+class Main(MPMain):
+    def _main(self):
+        parser = argparse.ArgumentParser(description='Split consensus with gaps into separate contigs')
+        parser.add_argument('sequence_files', metavar='file',
+                            type=str, nargs='+',
+                            help='File(s) with consensus.')
+        parser.add_argument('-m', '--min-gap', metavar='int',
+                            type=int, default=2, 
+                            help='Minimum number of gap characters to split on.')
+        args = parser.parse_args()
+        if not args.sequence_files:
+            print 'You should provide at least one file.' 
+            return 1
+        _gap = re.compile('-'*args.min_gap+'+')
+        def worker(filename):
+            for consensus in SeqLoader.load_file(filename):
+                if not consensus: continue
+                recs = []
+                seqs = [s for s in _gap.split(str(consensus.seq)) if s]
+                n_seqs = len(seqs)
+                sid = 'contig_%%0%dd' % (int(max(math.log10(n_seqs), 1))+1)
+                for i, contig in enumerate(seqs):
+                    recs.append(simple_rec(contig.replace('-', ''), sid % (i+1)))
+                outfile = os.path.join(os.path.dirname(filename), 
+                                       pretty_rec_name(consensus)+'_contigs.fasta') 
+                safe_write(recs, outfile, 'fasta')
+                return outfile
+        results = parallelize_work(self.abort_event, True, 1, worker, args.sequence_files)
+        if results:
+            print 'Output was written to:'
+            print '\n'.join(results)
+            print 'Done'
+            return 0
+        else:
+            print 'Error'
+            return 2
+
+if __name__ == '__main__':
+    Main(run=True)
+    

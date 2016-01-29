@@ -55,6 +55,7 @@ setup(name='seqconv',
                'gbfix',
                'rename_genomes',
                'analyze_ec',
+               'split_consensus'
                ],
       #data_files=[('share/applications', ['DegenPrimer.desktop'])]
       )
