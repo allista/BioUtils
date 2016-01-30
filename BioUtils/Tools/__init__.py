@@ -9,3 +9,4 @@ from .Misc import retry, mktmp_name, safe_unlink
 from .AbortableBase import AbortableBase, aborted
 from .WaitingThread import WaitingThread
 from .EchoLogger import EchoLogger
+from .Pipeline import PipelineNode

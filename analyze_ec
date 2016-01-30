@@ -8,8 +8,8 @@ Created on Dec 7, 2015
 '''
 
 import sys, os 
-import time, argparse, re 
-import inspect, tempfile, shutil
+import argparse, re 
+import tempfile, shutil
 from datetime import datetime
 from collections import OrderedDict
 
@@ -27,336 +27,16 @@ import dendropy as dp
 from xml.dom import minidom
 
 from BioUtils.Tools.Multiprocessing import MultiprocessingBase, MPMain, cpu_count
-from BioUtils.Tools.Output import user_message, isatty, ProgressCounter
-from BioUtils.Tools import mktmp_name, safe_unlink
+from BioUtils.Tools.Output import user_message, ProgressCounter
+from BioUtils.Tools import PipelineNode, mktmp_name, safe_unlink
+from BioUtils.Taxonomy import Lineage
+from BioUtils.KEGG import KEGG_cmd, KEGGRecord, KGene, Organism, Organisms
 from BioUtils.NCBI import BlastCLI, BlastWWW
 from BioUtils.NCBI.Applications import FormatDBCommandline
 from BioUtils.HMMER3.Applications import HMMBuildCommandline, HMMSearchCommandline
 from BioUtils.HMMER3 import BatchHmmer
 from BioUtils.SeqUtils import SeqLoader, num_fasta_records, unique_records, mktmp_fasta, safe_parse, safe_write
 
-RETRIES = 3
-PAUSE = 5
-
-def KEGG_cmd(cmd, args, outfile, emsg, force=False):
-    if not force and os.path.isfile(outfile): return True
-    for _try in xrange(RETRIES):
-        try: 
-            request = cmd(args)
-            with open(outfile, 'w') as out:
-                out.write(request.read())
-            return True
-        except Exception, ex:
-            print ex
-            if _try < RETRIES-1: time.sleep(PAUSE)
-            else: print emsg 
-    return False
-    
-
-class kgene(object):
-    '''Represents KEGG's gene database entry in the form organism:gen_id'''
-    def __init__(self, org, gid, desc=''):
-        self.org = org
-        self.id  = gid
-        self.description = desc
-        self.request = "%s:%s" % (self.org, self.id) 
-        self.filename = "%s-%s.kegg" % (self.org, self.id) 
-    
-    def __str__(self): return self.request
-#end class
-
-class Lineage(tuple):
-    '''Handles lineage information'''
-    
-    _prokaryotes = ('archaea', 'bacteria')
-    known_taxons = set(_prokaryotes)
-    
-    @classmethod
-    def _register(cls, lineage):
-        for t in lineage:
-            cls.known_taxons.add(t)
-    
-    def __new__(cls, line, delimiter=';'):
-        line = line.strip('\n\r')
-        taxons = [t.lower() for t in line.split(delimiter)]
-        if taxons and taxons[0] in cls._prokaryotes:
-            taxons.insert(0, 'prokaryotes')
-        return tuple.__new__(cls, taxons)
-    
-    def __init__(self, line, delimiter=';'):
-        self.str = ':'.join(self)
-        self._register(self)
-        
-    def __str__(self): return self.str
-    
-    def __eq__(self, other):
-        return self.str == other.str
-    
-    def __sub__(self, other):
-        return Lineage(self.str.replace(other.str, '', 1).strip(':'), delimiter=':')
-    
-    @property
-    def last(self):
-        return self[-1] if self else None
-    
-    def includes(self, other):
-        return other.str.startswith(self.str)
-    
-    @classmethod
-    def from_iter(cls, taxons):
-        if not taxons: return cls('')
-        return cls(';'.join(taxons))
-    
-    @classmethod
-    def common(cls, lineages, delimiter=':'):
-        if not lineages: return None
-        i = 0
-        common = []
-        lineages = list(lineages)
-        while True:
-            clades = set()
-            for l in lineages:
-                if isinstance(l, str):
-                    l = Lineage(l, delimiter)
-                if not isinstance(l, Lineage):
-                    raise ValueError('Unsupported lineage type: %s' % type(l))
-                if len(l) <= i:
-                    clades.clear() 
-                    break
-                if len(clades) > 0:
-                    if clades.add(l[i]): break
-                else: clades.add(l[i])
-            if len(clades) != 1: break
-            common.append(clades.pop())
-            i += 1
-        return cls(';'.join(common))
-    
-    @classmethod
-    def sameall(cls, lineages):
-        if not lineages: return False
-        l0 = lineages[0]
-        for l in lineages[1:]:
-            if l0 != l: return False
-        return True
-    
-    @classmethod
-    def samelast(cls, lineages):
-        if not lineages: return False
-        l0 = lineages[0].last
-        for l in lineages[1:]:
-            if l0 != l.last: return False
-        return True
-#end class
-
-class Organism(object):
-    '''Holds a KEGG's organism record as returned by /list/organism REST command'''
-    def __init__(self, line=None):
-        self.T = ""
-        self.org = ""
-        self.description = ""
-        self.lineage = None
-        if line is not None: self.parse(line)
-        
-    def __str__(self):
-        return '%s: %s [%s]' % (self.org, self.description, self.lineage)
-    
-    def parse(self, line):
-        fields = line.split('\t')
-        if len(fields) < 4:
-            raise ValueError("Organism line should have three fields divided by tabs")
-        self.T = fields[0]
-        self.org = fields[1]
-        self.description = fields[2]
-        self.lineage = Lineage(fields[3])
-        
-    def belongs2(self, lineage):
-        return lineage.includes(self.lineage)
-    
-    def fix_lineage(self):
-        genus = self.description.split()[0].lower()
-        if genus in Lineage.known_taxons:
-            if genus not in self.lineage: 
-                self.lineage = Lineage.from_iter(list(self.lineage)+[genus])
-            else:
-                self.lineage = Lineage.from_iter(self.lineage[:self.lineage.index(genus)+1])
-    
-    @classmethod
-    def from_record(cls, rec):
-        org = cls()
-        org.T = rec.id
-        org.org = rec.id
-        org.description = rec.annotations.get('organism', rec.name)
-        org.lineage = Lineage.from_iter(rec.annotations.get('taxonomy'))
-        return org
-#end class
-
-class Organisms(dict):
-    '''Representation and parser for KEGG's organism list'''
-    def __init__(self, filename=None):
-        dict.__init__(self)
-        self.parse(filename)
-        
-    def parse(self, filename):
-        if not filename or not os.path.isfile(filename): return False
-        print 'Parsing the list of organisms.'
-        with open(filename) as inp:
-            for line in inp:
-                try: org = Organism(line)
-                except ValueError, er:
-                    print 'Unable to parse organism info: %s' % line
-                    print er
-                    continue
-                self[org.org] = org
-                if org.description: self[org.description] = org
-        return True
-    
-    def fix_lineages(self):
-        for org in self.values():
-            org.fix_lineage()
-#end class
-
-class KEGGRecord(dict):
-    '''Generic representation of the the KEGG file format'''
-    def __init__(self):
-        dict.__init__(self)
-        self.entry = ""
-        self.description = ""
-        
-    def __str__(self):
-        return 'ENTRY: %s\t%s\n%s' % (self.entry, self.description, dict.__str__(self))
-    
-    @classmethod
-    def parse(cls, filename):
-        if not filename or not os.path.isfile(filename): return
-        with open(filename) as inp:
-            record = cls()
-            keyword = ""
-            for line in inp:
-                if line[:3] == '///':
-                    yield record
-                    record = cls()
-                    continue
-                if line[:12] != "            ":
-                    keyword = line[:12].strip()
-                data = line[12:].strip()
-                if keyword == "ENTRY":
-                    words = data.split()
-                    record.entry = words[1]
-                    record.description = " ".join(words[1:])
-                field = record.get(keyword, None)
-                if field is None:
-                    field = []
-                    record[keyword] = field
-                field.append(data)
-#end class
-
-class PipelineNode(object):
-    def __init__(self, func):
-        self.outfile  = None
-        self.inputs   = []
-        self.required = []
-        self.msg      = 'run %s' % func.__name__
-        self.func     = func
-        self.instance = None
-        self.iclass   = None
-        self.always_run = False
-        self.argspec = inspect.getargspec(func)
-        if self.argspec.keywords:
-            print 'Warning: %s uses %s keywords argument. '
-        
-    def nargs(self):
-        nargs = len(self.argspec.args)
-        if self.outfile: nargs -= 1
-        if self.instance or self.iclass: nargs -= 1
-        return nargs
-        
-    @classmethod
-    def new(cls, required=[], inputs=[], msg=None, always_run=False):
-        def factory(func):
-            node = cls(func)
-            node.inputs.extend(inputs)
-            node.required.extend(required)
-            node.always_run = always_run
-            if msg: node.msg = msg
-            return node
-        return factory
-    
-    def copy(self):
-        node = PipelineNode(self.func)
-        node.msg = self.msg
-        node.instance = self.instance
-        node.iclass = self.iclass
-        node.argspec = self.argspec
-        node.always_run = self.always_run
-        return node
-    
-    def plug(self, other):
-        self.inputs.append(other)
-        
-    def unplug(self, other):
-        try: self.inputs.remove(other)
-        except: pass
-        
-    def replug(self, old, new):
-        self.unplug(old)
-        self.plug(new)
-    
-    @staticmethod
-    def _isfile(filename):
-        return (filename and 
-                os.path.isfile(filename) and
-                os.stat(filename).st_size > 0)
-    
-    @classmethod
-    def _file_exists(cls, filename, msg):
-        if cls._isfile(filename):
-            print '\n%s exists and is up to date.' % filename
-            if isatty:
-                inp = raw_input('Are you sure you want to %s again? [y/n]: ' % msg)
-                if inp.lower() != 'y': return True
-            else:
-                print 'To %s again, remove/rename the "%s" file.' % (msg, filename)
-                return True
-        return False
-        
-    def __get__(self, instance, owner):
-        self.instance = instance
-        self.iclass = owner
-        return self
-    
-    def __call__(self, *inputs):
-        inputs = self.inputs+list(inputs)
-        nargs = self.nargs()
-        if self.argspec.varargs: 
-            if len(inputs) <= nargs:
-                raise RuntimeError('PipelineNode %s needs at least %d input nodes, has %d' %
-                                   (self.func.__name__, nargs+1, len(inputs)))
-        elif len(inputs) != nargs:
-            raise RuntimeError('PipelineNode %s needs exactly %d input nodes, has %d' %
-                               (self.func.__name__, nargs, len(inputs)))
-        args = [p.outfile for p in inputs]
-        if args and self.outfile:
-            print '\n'+', '.join(args)+' -> '+self.outfile
-        if self.outfile: args = [self.outfile] + args
-        force_run = False
-        for inp in inputs:
-            if self._isfile(inp.outfile):
-                if self._isfile(self.outfile) \
-                and os.stat(inp.outfile).st_mtime > os.stat(self.outfile).st_mtime:
-                    force_run = True
-            else:
-                print '\nNo "%s" file found.' % inp.outfile
-                if not inp(): return False
-                force_run = True
-        if not self.always_run and not force_run \
-        and self._file_exists(self.outfile, self.msg): return True
-        for r in self.required: r()
-        if not self.func.__get__(self.instance, self.iclass)(*args):
-            safe_unlink(self.outfile)
-            return False
-        return True
-#end class
-  
 
 class EC_Analyzer(MultiprocessingBase):
 
@@ -463,7 +143,7 @@ class EC_Analyzer(MultiprocessingBase):
         try:
             with user_message('Parsing KEGG record...'):
                 records = Enzyme.parse(open(recfile))
-                self.genes = OrderedDict(((g, kgene(gr[0].lower(), g)) 
+                self.genes = OrderedDict(((g, KGene(gr[0].lower(), g)) 
                                           for r in records for gr in r.genes for g in gr[1]))
         except Exception, e:
             print 'Unable to parse %s' % recfile
@@ -721,7 +401,7 @@ class EC_Analyzer(MultiprocessingBase):
                     else: 
                         print 'Adding sequence %s from %s' % (org.org, org.description)
                         self.alignment[shash] = rec
-                        self.genes[org.org] = kgene(org.org, org.org, rec.description)
+                        self.genes[org.org] = KGene(org.org, org.org, rec.description)
                         self.organisms[org.org] = org
             self.organisms.fix_lineages()
             if num_records >= len(self.alignment):
