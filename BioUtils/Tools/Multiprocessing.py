@@ -296,7 +296,7 @@ class MultiprocessingBase(AbortableBase):
         ret = True
         for w in work: ret &= w.wait()
         return ret
-        
+    
     def parallelize(self, timeout, worker, work, *args, **kwargs):
         #prepare and start jobs
         w = self.Work(timeout=timeout, **kwargs)
@@ -310,17 +310,24 @@ class MultiprocessingBase(AbortableBase):
     #end def
 
     def parallelize_work(self, timeout, func, data, *args, **kwargs):
-        mapper = MultiprocessingBase.data_mapper(func)
-        return self.parallelize(timeout, mapper, data, *args, **kwargs)
+        if not data: return None
+        if len(data) == 1: return [func(data[0], *args)]
+        worker = MultiprocessingBase.data_mapper(func)
+        return self.parallelize(timeout, worker, data, *args, **kwargs)
     #end def    
     
     def parallelize_functions(self, timeout, funcs, *args, **kwargs):
+        if not funcs: return None
+        if len(funcs) == 1: return [funcs[0](*args)]
         @MultiprocessingBase.data_mapper
         def worker(func, *args): return func(*args)
         return self.parallelize(timeout, worker, funcs, *args, **kwargs)
     #end def
     
     def parallelize_both(self, timeout, funcs, data, *args, **kwargs):
+        if not data or not funcs: return None
+        assert len(funcs) == len(data), 'Number of functions must be equal to the data length'
+        if len(data) == 1: return [funcs[0](data[0], *args)]
         @MultiprocessingBase.data_mapper
         def worker(func_and_data, *args):
             func, item = func_and_data
