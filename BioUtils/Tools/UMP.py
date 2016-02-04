@@ -12,14 +12,10 @@ import signal
 import multiprocessing as mp
 from multiprocessing.managers import BaseManager
 
-from .Debug import Pstats #test
-
-
 def ignore_interrupt():
     signal.signal(signal.SIGINT,  signal.SIG_IGN)
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
     signal.signal(signal.SIGQUIT, signal.SIG_IGN)
-#end def
 
 
 class UProcess(mp.Process):
@@ -27,14 +23,12 @@ class UProcess(mp.Process):
     def run(self):
         ignore_interrupt()
         mp.Process.run(self)
-#end class
 
 
 class UManager(BaseManager):
     '''Multiprocessing Manager that ignores interrupt, term and quit signals'''
     def start(self, initializer=ignore_interrupt, initargs=()):
-        Pstats(self.__class__.__name__)(BaseManager.start)(self, initializer=initializer, initargs=initargs)#test
-#end class
+        BaseManager.start(self, initializer=initializer, initargs=initargs)
 
 
 class AutoProxyMeta(type):
@@ -47,7 +41,6 @@ class AutoProxyMeta(type):
             return self._callmethod(%r, args, kwds)''' % (meth, meth) in dic
         dic.update(attrs)
         return super(AutoProxyMeta, cls).__new__(cls, name, bases, dic)
-#end metaclass
 
 
 class _FuncManager(UManager):
@@ -69,7 +62,6 @@ class _FuncManager(UManager):
         temp.__name__ = name
         setattr(cls, name, temp)
         cls._functions.add(name)
-    #end def
     
     @classmethod
     def add_functions(cls, funcs, names=None):
@@ -78,7 +70,6 @@ class _FuncManager(UManager):
             except: name = (func.__name__).lstrip('_')
             cls.register('_'+name, func)
             cls._register_function(name)
-    #end def
 #end class
 
 def FuncManager(typeid, funcs, names=None):
@@ -87,7 +78,6 @@ def FuncManager(typeid, funcs, names=None):
     manager = type(typeid, (_FuncManager,), {})
     manager.add_functions(funcs, names)
     return manager
-#end def
 
 
 def at_manager(Manager, func_name):
@@ -99,4 +89,3 @@ def at_manager(Manager, func_name):
         return result
     temp.__name__ = func_name
     return temp
-#end def
