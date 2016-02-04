@@ -26,7 +26,7 @@ isatty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
 class SeqLoader(MultiprocessingBase):
     ext_re = re.compile(r'.*\.(\w+)$')
     schemas   = {'fasta': re.compile(r'.*\.f(asta|as|a|aa|fn|rn|na)$'),
-                 'gb':    re.compile(r'.*\.g(bk|b)$'),
+                 'gb':    re.compile(r'.*\.gb(ff|k)$'),
                  'embl':  re.compile(r'.*\.embl$'),
     }
     
@@ -104,7 +104,7 @@ class SeqView(object):
             raise ValueError('All files should be of the same type, but %d types found: %s' % (len(schemas), schemas))
         if not valid:
             print 'No valid files provided.'
-            return
+            return False
         if not dbname:
             self.dbname = mktmp_name('_SeqView.db')
             safe_unlink(self.dbname)
@@ -113,6 +113,7 @@ class SeqView(object):
         self.db = SeqIO.index_db(self.dbname, valid, schemas.pop())
         self._ids = tuple(sorted(self.db.keys()))
         self.master = True
+        return bool(self)
 
     def reload(self, dbname):
         self.close()
