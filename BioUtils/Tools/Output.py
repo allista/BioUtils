@@ -159,6 +159,7 @@ def simple_timeit(name=''):
     try:
         t0 = time()
         print name+'...\n'
+        sys.stdout.flush()
         yield 
     finally:
         print '%sElapsed time: %s\n' % (name+': ' if name else '', timedelta(seconds=time()-t0))
