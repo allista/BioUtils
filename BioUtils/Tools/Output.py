@@ -18,8 +18,8 @@ isatty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
 class OutIntercepter(object):
     '''A file-like object which intercepts std-out/err'''
     def __init__(self):
-        self._oldout = None
-        self._olderr = None
+        self._out = None
+        self._err = None
     #end def
     
     def write(self, text): pass
@@ -27,24 +27,34 @@ class OutIntercepter(object):
     def flush(self): pass
     
     def __enter__(self):
-        self._oldout = sys.stdout
-        self._olderr = sys.stderr
+        self._out = sys.stdout
+        self._err = sys.stderr
         sys.stdout = sys.stdout = self
         return self
     #end def
     
     def __exit__(self, _type, _value, _traceback):
-        if _type is not None:
+        if _type is SystemExit: pass
+        elif _type is not None:
             print _value
-            traceback.print_exception(_type, _value, _traceback, file=self._olderr)
-        sys.stdout = self._oldout
-        sys.stderr = self._olderr
+            traceback.print_exception(_type, _value, _traceback, file=self._err)
+        sys.stdout = self._out
+        sys.stderr = self._err
         return True
     #end def
 #end class
 
-
 class OutQueue(OutIntercepter, Queue):
+    '''A file-like object which puts text written into it 
+    in a cross-process queue'''
+    def __init__(self, maxsize=0):
+        OutIntercepter.__init__(self)
+        Queue.__init__(self, maxsize)
+
+    def write(self, text): self.put(text)
+#end class
+
+class OutQueueWithID(OutIntercepter, Queue):
     '''A file-like object which puts text written into it 
     in a cross-process queue'''
     def __init__(self, maxsize=0):

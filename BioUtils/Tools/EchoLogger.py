@@ -44,9 +44,9 @@ class EchoLogger(OutIntercepter):
             print _value
             self._logger.error('Exception occured:', 
                                exc_info=(_type, _value, _traceback))
-            traceback.print_exception(_type, _value, _traceback, file=self._olderr)
-        sys.stdout = self._oldout
-        sys.stderr = self._olderr
+            traceback.print_exception(_type, _value, _traceback, file=self._err)
+        sys.stdout = self._out
+        sys.stderr = self._err
         self._logger.log(self._level, '=== END LOGGING ===')
         return True
     #end def
@@ -55,10 +55,10 @@ class EchoLogger(OutIntercepter):
     def write(self, text):
         log_text = ' '.join(text.split())
         if log_text: self._logger.log(self._level, log_text, exc_info=False)
-        self._oldout.write(text)
+        self._out.write(text)
     #end def
     
-    def flush(self): self._oldout.flush()
+    def flush(self): self._out.flush()
 #end class
 
 
