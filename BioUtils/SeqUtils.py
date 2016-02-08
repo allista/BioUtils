@@ -178,6 +178,9 @@ class SeqView(object):
         v._ids = keys
         return v
     
+    def clone(self):
+        return self.__deepcopy__(dict())
+    
     def __deepcopy__(self, memo):
         return _unpickle_SeqView(self.dbname, deepcopy(self._ids, memo))
     
@@ -323,4 +326,6 @@ def simple_feature(start, end, fid='<unknown id>', ftype='misc_feature'):
     return SeqFeature(loc, type=ftype, id=fid)
 
 def pretty_rec_name(rec):
-    return rec.annotations.get('source', rec.description or rec.id)
+#    print 'source: %s, id %s, desc %s' % (rec.annotations.get('source', None), rec.id, rec.description)#test
+    if rec.description is None: rec.description = ''
+    return rec.annotations.get('source', rec.description.replace(rec.id, '').strip() or rec.id)
