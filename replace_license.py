@@ -8,12 +8,12 @@ import re, os
 
 replace = r'''(#\n)*# Copyright \(C\) 201\d Allis Tauri <allista@gmail\.com>
 # 
-# (BioUtils|indicator_gddccontrol|degen_primer) is free software: you can redistribute it and/or modify it
+# \w* is free software: you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by the
 # Free Software Foundation, either version 3 of the License, or
 # \(at your option\) any later version.
 # 
-# (BioUtils|indicator_gddccontrol|degen_primer) is distributed in the hope that it will be useful, but
+# \w* is distributed in the hope that it will be useful, but
 # WITHOUT ANY WARRANTY; without even the implied warranty of
 # MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE\.
 # See the GNU General Public License for more details\.
@@ -24,7 +24,7 @@ replace = r'''(#\n)*# Copyright \(C\) 201\d Allis Tauri <allista@gmail\.com>
 lre = re.compile(replace, re.MULTILINE)
 
 if __name__ == '__main__':
-    for dirpath, dirnames, filenames in os.walk(os.path.dirname(__file__)):
+    for dirpath, dirnames, filenames in os.walk(os.path.abspath(os.curdir)):
         for filename in filenames:
             if filename == os.path.basename(__file__): continue
             curfile = os.path.join(dirpath, filename)
