@@ -22,7 +22,7 @@ def retry(func, error_msg, num_retries):
     return result
 #end def
 
-def mktmp_name(suffix, register=True):
+def mktmp_name(suffix='', register=True):
     fd, fn = tempfile.mkstemp(suffix, 'wb')
     if register: register_tmp_file(fn)
     os.close(fd)
@@ -32,3 +32,21 @@ def mktmp_name(suffix, register=True):
 def safe_unlink(filename):
     try: os.unlink(filename)
     except: pass
+
+class ListDB(object):
+    def __init__(self):
+        self._db = {}
+    
+    def get(self, key, default=None):
+        return self._db.get(key, default)
+    
+    def __getitem__(self, key): 
+        return self._db[key]
+    
+    def __setitem__(self, key, value):
+        l = self._db.get(key, None)
+        if l is None: self._db[key] = [value]
+        else: l.append(value)
+        
+    def __iter__(self): return self._db.__iter__()
+        
