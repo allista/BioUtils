@@ -12,7 +12,8 @@ from collections import Sequence
 
 from .UMP import UManager
 
-prefix = 'BioUtils_'
+PREFIX = 'BioUtils_'
+TMPDIR = gettempdir()
 
 class _SetManager(UManager): pass
 _SetManager.register('set', set)
@@ -61,11 +62,9 @@ class tmpDict(DbfilenameShelf):
     def __init__(self, fname=None, tmpdir=None, persistent=False):
         if fname is None:
             #get tmp directory
-            if tmpdir is None:
-                self._tmpdir = gettempdir()
-            else: self._tmpdir = tmpdir
+            self._tmpdir = TMPDIR if tmpdir is None else tmpdir
             #create tmp file for db
-            fd, self.filename = mkstemp('', prefix, dir=self._tmpdir)
+            fd, self.filename = mkstemp('', PREFIX, dir=self._tmpdir)
             os.close(fd); os.unlink(self.filename)
             #create a shelf in the db
             DbfilenameShelf.__init__(self, self.filename, flag='n', protocol=-1)
