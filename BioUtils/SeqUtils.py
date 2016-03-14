@@ -79,7 +79,8 @@ class SeqView(object):
     dict/list picklable read-only SeqRecord container.
     '''
     
-    def __init__(self):
+    def __init__(self, upper=False):
+        self.upper  = upper
         self.dbname = None
         self.db     = None
         self._ids   = []
@@ -143,12 +144,15 @@ class SeqView(object):
     def __iter__(self): return (self.db[key] for key in self._ids)
     
     def __getitem__(self, key):
+        rec = None
         if isinstance(key, int):
-            return self[self._ids[key]]
-        if isinstance(key, str):
-            return self.db[key]
-        if isinstance(key, slice):
-            return self.subview(self._ids[key])
+            rec = self[self._ids[key]]
+        elif isinstance(key, str):
+            rec = self.db[key]
+        elif isinstance(key, slice):
+            rec = self.subview(self._ids[key])
+        if rec is None: raise KeyError('Sequence %s not found' % key)
+        return rec.upper() if self.upper else rec
         
     def get(self, key, default=None):
         try: return self[key]
@@ -172,6 +176,7 @@ class SeqView(object):
         
     def subview(self, keys):
         v = SeqView()
+        v.upper = self.upper
         v.dbname = self.dbname
         v.db = self.db
         v.tmp_db = False
@@ -182,13 +187,13 @@ class SeqView(object):
         return self.__deepcopy__(dict())
     
     def __deepcopy__(self, memo):
-        return _unpickle_SeqView(self.dbname, deepcopy(self._ids, memo))
+        return _unpickle_SeqView(self.dbname, deepcopy(self._ids, memo), self.upper)
     
     def __reduce__(self):
-        return _unpickle_SeqView, (self.dbname, self._ids)
+        return _unpickle_SeqView, (self.dbname, self._ids, self.upper)
 
-def _unpickle_SeqView(dbname, ids):
-    v = SeqView()
+def _unpickle_SeqView(dbname, ids, upper):
+    v = SeqView(upper)
     v.dbname = dbname
     v.db = SeqIO.index_db(dbname)
     v.master = True
