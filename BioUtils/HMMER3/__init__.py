@@ -26,7 +26,7 @@ from Bio.SeqFeature import SeqFeature, FeatureLocation
 from BioUtils.Tools.Multiprocessing import MultiprocessingBase, cpu_count
 from BioUtils.Tools.tmpStorage import shelf_result, roDict
 
-from BioUtils.Tools import retry, mktmp_name
+from BioUtils.Tools.Misc import retry, mktmp_name
 from BioUtils.Tools.Output import user_message, Progress, ProgressCounter
 from BioUtils.SeqUtils import mktmp_fasta, cat_records, Translator, get_indexes_of_genes
 from BioUtils.HMMER3.Applications import HMMSearchCommandline

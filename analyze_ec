@@ -28,7 +28,8 @@ from xml.dom import minidom
 
 from BioUtils.Tools.Multiprocessing import MultiprocessingBase, MPMain, cpu_count
 from BioUtils.Tools.Output import user_message, ProgressCounter
-from BioUtils.Tools import PipelineNode, mktmp_name, safe_unlink
+from BioUtils.Tools.Pipeline import PipelineNode
+from BioUtils.Tools.Misc import mktmp_name, safe_unlink
 from BioUtils.Taxonomy import Lineage
 from BioUtils.KEGG import KEGG_cmd, KEGGRecord, KGene, Organism, Organisms
 from BioUtils.NCBI import BlastCLI, BlastWWW

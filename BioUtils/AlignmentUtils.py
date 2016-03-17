@@ -19,7 +19,7 @@ from Bio.Align import MultipleSeqAlignment
 from BioUtils.SeqUtils import mktmp_fasta, SeqLoader, copy_attrs
 from BioUtils.Tools.Text import FilenameParser, issingleletter
 from BioUtils.Tools.Multiprocessing import cpu_count
-from BioUtils.Tools import safe_unlink
+from BioUtils.Tools.Misc import safe_unlink
 
 class AlignmentExt(MultipleSeqAlignment):
     def __init__(self, records, alphabet=None, annotations=None):

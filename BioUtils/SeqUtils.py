@@ -19,7 +19,7 @@ from Bio.Alphabet import generic_alphabet
 from .Tools.Multiprocessing import MultiprocessingBase
 from .Tools.tmpStorage import shelf_result, roDict, register_tmp_file, cleanup_file
 from .Tools.Text import FilenameParser
-from .Tools import mktmp_name, safe_unlink
+from .Tools.Misc import mktmp_name, safe_unlink
 
 re_type = type(re.compile(''))
 isatty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
