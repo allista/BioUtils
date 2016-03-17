@@ -6,9 +6,10 @@ Created on Jun 30, 2012
 @author: Allis Tauri <allista@gmail.com>
 '''
 
-from math import log
+import re
 import random
 import string
+from math import log
 from time import ctime
 
 text_width = 80
@@ -128,5 +129,34 @@ def format_quantity(quantity, unit='U'):
     return 'N/A  %s' % unit
 #end def
 
-def strip_ext(name):
-    return name[:name.rfind('.')]
+def issingleletter(s, l=None):
+    if not s: return False
+    if len(s) == 1: return True
+    if l is None: l = s[0]
+    return all(si==l for si in s)
+
+class FilenameParser(object):
+    ext_re = re.compile(r'.*\.(\w+)$')
+    schemas = {}
+
+    @staticmethod
+    def strip_ext(name):
+        return name[:name.rfind('.')]
+    
+    @classmethod
+    def get_ext(cls, filename):
+        m = cls.ext_re.match(filename)
+        return m.group(1) if m else ''
+    
+    @classmethod
+    def guess_schema(cls, filename):
+        for schema in cls.schemas:
+            if cls.schemas[schema].match(filename):
+                return schema
+        return cls.get_ext(filename)
+
+    @classmethod
+    def schema(cls, filename, schema):
+        if schema: return schema
+        return cls.guess_schema(filename)
+
