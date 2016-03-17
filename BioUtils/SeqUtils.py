@@ -18,29 +18,19 @@ from Bio.Alphabet import generic_alphabet
 
 from .Tools.Multiprocessing import MultiprocessingBase
 from .Tools.tmpStorage import shelf_result, roDict, register_tmp_file, cleanup_file
+from .Tools.Text import FilenameParser
 from .Tools import mktmp_name, safe_unlink
 
 re_type = type(re.compile(''))
 isatty = hasattr(sys.stdout, 'isatty') and sys.stdout.isatty()
 
-class SeqLoader(MultiprocessingBase):
-    ext_re = re.compile(r'.*\.(\w+)$')
-    schemas   = {'fasta': re.compile(r'.*\.f(asta|as|a|aa|fn|rn|na)$'),
-                 'gb':    re.compile(r'.*\.gb(ff|k)$'),
-                 'embl':  re.compile(r'.*\.embl$'),
-    }
+class SeqLoader(MultiprocessingBase, FilenameParser):
+    fasta_re = re.compile(r'.*\.f(asta|as|a|aa|fn|rn|na)$')
     
-    @classmethod
-    def get_ext(cls, filename):
-        m = cls.ext_re.match(filename)
-        return m.group(1) if m else ''
-        
-    @classmethod
-    def guess_schema(cls, filename):
-        for schema in cls.schemas:
-            if cls.schemas[schema].match(filename):
-                return schema
-        return cls.get_ext(filename)
+    schemas = {'fasta': fasta_re,
+               'gb':    re.compile(r'.*\.gb(ff|k)$'),
+               'embl':  re.compile(r'.*\.embl$'),
+    }
     
     def __init__(self, abort_event):
         super(SeqLoader, self).__init__(abort_event)
@@ -53,11 +43,10 @@ class SeqLoader(MultiprocessingBase):
         if not schema: schema = cls.guess_schema(filename) 
         try: return list(SeqIO.parse(filename, schema))
         except Exception, e:
-            print 'Unable to parse %s as %s' % (filename, schema)
-            print e
+            print 'Unable to parse %s as %s\n%s' % (filename, schema, str(e))
             return None
         
-    def load_dir(self, dirname, schema=None, namefilter=None):
+    def load_dir(self, dirname, schema=None, namefilter=None, flatten=True):
         if isinstance(namefilter, str):
             namefilter = re.compile(namefilter)
         if isinstance(namefilter, re_type):
@@ -68,11 +57,17 @@ class SeqLoader(MultiprocessingBase):
         files = [f for f in (os.path.join(dirname, fn) 
                              for fn in os.listdir(dirname) if flt(fn))
                  if os.path.isfile(f)]
-        return self.load_files(files, schema)
+        if not files:
+            print 'No files found.'
+            return None
+        return self.load_files(files, schema, flatten)
     
-    def load_files(self, files, schema=None):
-        return list(itertools.chain.from_iterable(r for r in self.parallelize_work(1, self.load_file, files, schema) if r))
-
+    def load_files(self, files, schema=None, flatten=True):
+        results = self.parallelize_work(1, self.load_file, files, schema)
+        if not results: return None
+        results = filter(lambda x: bool(x), results)
+        if flatten: return list(itertools.chain.from_iterable(results))
+        else: return results
 
 class SeqView(object):
     '''Uses Bio.SeqIO.index_db with a temporary database to create a mixed
@@ -248,14 +243,14 @@ class Translator(MultiprocessingBase):
         return translation
     
     
-def load_dir(abort_event, dirname, schema=None, namefilter=None):
+def load_dir(abort_event, dirname, schema=None, namefilter=None, flatten=True):
     loader = SeqLoader(abort_event)
-    return loader.load_dir(dirname, schema, namefilter)
+    return loader.load_dir(dirname, schema, namefilter, flatten)
 
 
-def load_files(abort_event, filenames, schema=None):
+def load_files(abort_event, filenames, schema=None, flatten=True):
     loader = SeqLoader(abort_event)
-    return loader.load_files(filenames, schema)
+    return loader.load_files(filenames, schema, flatten)
 
 
 def mktmp_fasta(rec, register=True):
@@ -291,18 +286,16 @@ def unique_records(records):
         ids.add(r.id)
         yield  r
         
-def safe_parse(filename, scheme, alphabet=None):
-    try: return SeqIO.parse(filename, scheme, alphabet)
+def safe_parse(filename, schema=None, alphabet=None):
+    try: return SeqIO.parse(filename, SeqLoader.schema(filename, schema), alphabet)
     except Exception, e:
-        print 'Unable to parse %s' % filename
-        print e, '\n'
+        print 'Unable to parse %s\n%s\n' % (filename, str(e))
         return []
 
-def safe_write(records, filename, scheme):
-    try: SeqIO.write(records, filename, scheme)
+def safe_write(records, filename, schema=None):
+    try: SeqIO.write(records, filename, SeqLoader.schema(filename, schema))
     except Exception, e:
-        print 'Unable to write records to %s' % filename
-        print e, '\n'
+        print 'Unable to write records to %s\n%s\n' % (filename, str(e))
         return False
     return True
 
@@ -314,13 +307,14 @@ def get_indexes_of_genes(rec):
     if not features:
         features = features_of_type_indexes(rec, 'gene')
         if not features:
-            print 'No gene/CDS features found in:'
-            print rec.id, rec.description
+            print 'No gene/CDS features found in:\n%s %s' % (rec.id, rec.description)
             return None
     return features
 
-def simple_rec(seq, sid, name='', description=''):
-    return SeqRecord(Seq(seq, generic_alphabet), id=sid, name=name, description=description)
+def simple_rec(seq, sid, name='', description='', feature='', alphabet=generic_alphabet):
+    rec = SeqRecord(Seq(seq, alphabet), id=sid, name=name, description=description)
+    if feature: rec.features.append(simple_feature(0, len(rec), feature, feature))
+    return rec
 
 def simple_feature(start, end, fid='<unknown id>', ftype='misc_feature'):
     '''Make a SeqFeature starting at start and ending at end.
@@ -334,3 +328,10 @@ def pretty_rec_name(rec):
 #    print 'source: %s, id %s, desc %s' % (rec.annotations.get('source', None), rec.id, rec.description)#test
     if rec.description is None: rec.description = ''
     return rec.annotations.get('source', rec.description.replace(rec.id, '').strip() or rec.id)
+
+def copy_attrs(frec, trec):
+    trec.id = frec.id
+    trec.name = frec.name
+    trec.description = frec.description
+    return trec
+    
