@@ -105,7 +105,7 @@ class Progress(object):
     progress_len  = '      '
     progress_back = '\b'*len(progress_len)
     
-    def __init__(self, msg, total, replace=True, is_index=True):
+    def __init__(self, msg, total=0, replace=True, is_index=True):
         self.start_msg = msg
         self.total     = total
         self.replace   = replace
@@ -124,18 +124,21 @@ class Progress(object):
         print ''
         sys.stdout.flush()
     
+    def _progress_string(self, progress):
+        return ('[%3.0f%%]' % (float(progress)/self.total*100.0) 
+                if self.total > 0 else '[%s]' % progress)
+    
     def step(self, progress):
         if self.is_index: progress += 1
         if self.replace:
-            msg = ('%s[%3.0f%%]' % 
+            msg = ('%s%s' %
                    (self.progress_back if isatty else ' ',
-                    float(progress)/self.total*100.0))
+                    self._progress_string(progress)))
             if msg != self._last_msg: sys.stdout.write(msg)
         else:
-            msg = ('[%3.0f%%] %s of %s\n' % 
-                   (float(progress)/self.total*100.0,
-                    progress, self.total))
-            sys.stdout.write(msg)
+            msg = '%s' % self._progress_string(progress)
+            if self.total > 0: msg += ' %s of %s' % (progress, self.total)
+            sys.stdout.write(msg+'\n')
         self._last_msg = msg
         sys.stdout.flush()
 #end class
@@ -146,20 +149,18 @@ class ProgressCounter(Progress):
     Simple tty progress indicator of the form
     > Message [ 56%]
     '''
-    progress_len  = '      '
-    progress_back = '\b'*len(progress_len)
-    
-    def __init__(self, msg, total, replace=True):
+    def __init__(self, msg, total=0, replace=True):
         assert(isinstance(total, int)), 'total should be integer'
         super(ProgressCounter, self).__init__(msg, total, replace, True)
         self._count = 0
     
     @property
     def percent(self):
-        return float(self._count+1)/self.total*100.0
+        return (float(self._count+1)/self.total*100.0 
+                if self.total > 0 else self._count+1)
     
     def count(self):
-        if self._count < self.total:
+        if self.total == 0 or self._count < self.total:
             self.step(self._count)
             self._count += 1
 #end class
