@@ -20,7 +20,7 @@ class PipelineNode(object):
         self.always_run = False
         self.argspec = inspect.getargspec(func)
         if self.argspec.keywords:
-            print 'Warning: %s uses %s keywords argument. ' % func.__name__, self.argspec.keywords
+            print 'Warning: %s uses %s keywords argument. ' % (func.__name__, self.argspec.keywords)
         
     def nargs(self):
         nargs = len(self.argspec.args)
