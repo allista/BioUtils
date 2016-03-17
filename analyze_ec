@@ -77,7 +77,7 @@ class EC_Analyzer(MultiprocessingBase):
         self._get_local_data.outfile = self.namebase+'-local.gb'
         self._psiblast_data.outfile = self.namebase+'-psi.xml'
         self._fetch_psiblast_data.outfile = self.namebase+'-psi.gb'
-        self._filter_unique_date.outfile = self.namebase+'-filtered.unique.gb'
+        self._filter_unique_data.outfile = self.namebase+'-filtered.unique.gb'
         self._hmm_filter_data.outfile = self.namebase+'-filtered.hmm.gb'
         self._hom_filter_data.outfile = self.namebase+'-filtered.hom.gb'
         self._merge_additional_data.outfile = self.namebase+'-seqs.merged.faa'
@@ -276,7 +276,7 @@ class EC_Analyzer(MultiprocessingBase):
         return True
     
     @PipelineNode.new(msg='remove duplicate sequences')
-    def _filter_unique_date(self, filteredfile, recordsfile):
+    def _filter_unique_data(self, filteredfile, recordsfile):
         print 'Removing duplicate records from %s' % recordsfile
         try: SeqIO.write(unique_records(SeqIO.parse(recordsfile, 'gb')), 
                          filteredfile, 'gb')
@@ -457,8 +457,8 @@ class EC_Analyzer(MultiprocessingBase):
                 self._fetch_psiblast_data()):
             return False
         psi_data = self._fetch_psiblast_data
-        if self._filter_unique_date(psi_data):
-            psi_data = self._filter_unique_date 
+        if self._filter_unique_data(psi_data):
+            psi_data = self._filter_unique_data 
         if self.hmm_evalue >= 0 and self._hmm_filter_data(psi_data):
             psi_data = self._hmm_filter_data
         if self.hom_filter > 0 and self._hom_filter_data(psi_data):

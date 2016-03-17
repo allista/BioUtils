@@ -37,7 +37,7 @@ def get_organism(filename):
 
 if __name__ == '__main__':
     #parse arguments
-    parser = argparse.ArgumentParser(description='Remanes genbank files according to source organism.')
+    parser = argparse.ArgumentParser(description='Renames genbank files according to source organism.')
     parser.add_argument('files', metavar='filename.gb',
                         type=str, nargs='+',
                         help='File(s) in genbank format.')
