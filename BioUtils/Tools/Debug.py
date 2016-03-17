@@ -7,7 +7,8 @@ Created on Jan 20, 2016
 '''
 
 import sys, traceback
-import psutil
+import psutil, inspect
+from StringIO import StringIO
 
 from .Output import simple_timeit
 
@@ -65,6 +66,13 @@ def raise_tb_on_error(func):
     def wrapper(*args, **kwargs):
         try: return func(*args, **kwargs)
         except: raise_tb()
+    copy_name(wrapper, func)
+    return wrapper
+
+def print_stack(func):
+    def wrapper(*args, **kwargs):
+        traceback.print_stack()
+        return func(*args, **kwargs)
     copy_name(wrapper, func)
     return wrapper
 
