@@ -9,9 +9,6 @@ using given translation table
 @author: Allis Tauri <allista@gmail.com>
 '''
 
-if __name__ == '__main__':
-    pass
-
 #imports
 import re
 import os
@@ -24,65 +21,66 @@ except:
     sys.exit(1)
 from BioUtils.Alignment import Alignment
 
-#parse command line arguments
-parser = argparse.ArgumentParser(description='This is a tool to align multiple \
-nucleotide sequences as amino-acid sequences using given translation table.')
-parser.add_argument('sequences_file', 
-                    type=str, nargs='+',
-                    help='file(s) with DNA sequence data in FASTA or GenBank format')
-parser.add_argument('-t --trans-table', dest='trans_table', metavar='N', 
-                    required=False, type=int, default=1,
-                    help='Translation table ID as defined by NCBI. It is used for \
-                    sequences without predefined translation table only. It is advisable \
-                    though to provide sequences in a GenBank file with translation \
-                    table defined for each sequence in it.')
-parser.add_argument('-f --force-table', dest='force_table', 
-                    required=False, action='store_true', 
-                    help='Force to use a translation table provided with -t option.')
-args = parser.parse_args()
-
-
-#parse sequences
-print ""
-sequences = dict()
-for filename in args.sequences_file:
-    if not os.path.isfile(filename):
-        print "No such file: "+filename
-        continue
-    genbank_pattern = re.compile(".*(\.gb|\.gbk)$")
-    fasta_pattern   = re.compile(".*(\.fa|\.fasta)$")
-    if genbank_pattern.match(filename): filetype = "gb"
-    elif fasta_pattern.match(filename): filetype = "fasta"
-    else:
-        print "Unable to guess format of "+filename
-        print "The file will be ignored."
-        print "*note: it is expected that GenBank files have .gb or .gbk extension \
-and FASTA files have .fa or .fasta extension." 
-        continue
+if __name__ == '__main__':
+    #parse command line arguments
+    parser = argparse.ArgumentParser(description='This is a tool to align multiple \
+    nucleotide sequences as amino-acid sequences using given translation table.')
+    parser.add_argument('sequences_file', 
+                        type=str, nargs='+',
+                        help='file(s) with DNA sequence data in FASTA or GenBank format')
+    parser.add_argument('-t --trans-table', dest='trans_table', metavar='N', 
+                        required=False, type=int, default=1,
+                        help='Translation table ID as defined by NCBI. It is used for \
+                        sequences without predefined translation table only. It is advisable \
+                        though to provide sequences in a GenBank file with translation \
+                        table defined for each sequence in it.')
+    parser.add_argument('-f --force-table', dest='force_table', 
+                        required=False, action='store_true', 
+                        help='Force to use a translation table provided with -t option.')
+    args = parser.parse_args()
+    
+    
+    #parse sequences
+    print ""
+    sequences = dict()
+    for filename in args.sequences_file:
+        if not os.path.isfile(filename):
+            print "No such file: "+filename
+            continue
+        genbank_pattern = re.compile(".*(\.gb|\.gbk)$")
+        fasta_pattern   = re.compile(".*(\.fa|\.fasta)$")
+        if genbank_pattern.match(filename): filetype = "gb"
+        elif fasta_pattern.match(filename): filetype = "fasta"
+        else:
+            print "Unable to guess format of "+filename
+            print "The file will be ignored."
+            print "*note: it is expected that GenBank files have .gb or .gbk extension \
+    and FASTA files have .fa or .fasta extension." 
+            continue
+        try:
+            print "parsing " + filename + " as " + filetype
+            for record in list(SeqIO.parse(filename, filetype)):
+                sequences[record.id] = record
+        except Exception,e:
+            print 'align_as_amino.parse sequence:'
+            print e
+            sys.exit(1)
+        if len(sequences) < 2:
+            print "You should provide at least 2 sequences to make an alignment."
+            sys.exit(1)
+    
+    
+    #allign nucleotide sequence as amino-asid sequence
+    alignment = Alignment()
+    aligned_seqs = alignment.align_translated(sequences.values(), args.trans_table, args.force_table) 
+    
+    
+    #output the final alignment
+    out_clustalw = args.sequences_file[0].rstrip(".fagbk")+".aln"
     try:
-        print "parsing " + filename + " as " + filetype
-        for record in list(SeqIO.parse(filename, filetype)):
-            sequences[record.id] = record
+        AlignIO.write(aligned_seqs, out_clustalw, "clustal")
+        print "\nOutput written to "+out_clustalw
     except Exception,e:
-        print 'align_as_amino.parse sequence:'
+        print 'align_as_amino.output alignment:'
         print e
         sys.exit(1)
-    if len(sequences) < 2:
-        print "You should provide at least 2 sequences to make an alignment."
-        sys.exit(1)
-
-
-#allign nucleotide sequence as amino-asid sequence
-alignment = Alignment()
-aligned_seqs = alignment.align_translated(sequences.values(), args.trans_table, args.force_table) 
-
-
-#output the final alignment
-out_clustalw = args.sequences_file[0].rstrip(".fagbk")+".aln"
-try:
-    AlignIO.write(aligned_seqs, out_clustalw, "clustal")
-    print "\nOutput written to "+out_clustalw
-except Exception,e:
-    print 'align_as_amino.output alignment:'
-    print e
-    sys.exit(1)
