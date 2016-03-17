@@ -197,8 +197,8 @@ class Work(Sequence, Thread, AbortableBase):
         self.get_nowait()
     
     def get_result(self):
-        assert self._launched, 'Work should be launched before calling get_results'
         assert self.assembler is not None, 'Assembler should be set before calling get_results'
+        if not self._launched: return
         while self._jobs:
             finished_job = None
             for i,job in enumerate(self._jobs):
@@ -243,9 +243,11 @@ class Work(Sequence, Thread, AbortableBase):
         #IO code=4 means the same
         except IOError, e:
             if e.errno == errno.EINTR: return
+            print 'Unhandled IOError:'
             print e
             self._abort_event.set()
         except Exception, e:
+            print 'Unhandled Exception:'
             print e
             self._abort_event.set()
     #end def
@@ -356,6 +358,7 @@ from .tmpStorage import shelf_result
 from .UMP import FuncManager
 from multiprocessing import Manager
 import sys
+import argparse
 
 Parallelizer = FuncManager('Parallelizer', 
                            (parallelize_work,
@@ -366,10 +369,14 @@ Parallelizer = FuncManager('Parallelizer',
                             shelf_result(parallelize_both)))
 
 class MPMain(object):
+    description = 'Description is not filled in a subclass'
+    
     def __init__(self, pid=os.getpid(), run=False):
         self.pid = pid
         self.mgr = Manager()
         self.abort_event = self.mgr.Event()
+        self.argparser = None
+        self.args = None
         signal.signal(signal.SIGINT,  self.sig_handler)
         signal.signal(signal.SIGTERM, self.sig_handler)
         signal.signal(signal.SIGQUIT, self.sig_handler)
@@ -388,6 +395,14 @@ class MPMain(object):
     
     def _main(self): pass
     
+    def argument(self, *args, **kwargs):
+        if self.argparser is None:
+            self.argparser = argparse.ArgumentParser(self.description)
+        self.argparser.add_argument(*args, **kwargs)
+        
+    def parse_args(self):
+        self.args = self.argparser.parse_args()
+    
     def __call__(self, sys_exit=True, *args, **kwargs):
         try: ret = self._main()
         except SystemExit, e:
@@ -395,6 +410,7 @@ class MPMain(object):
             else: return e.code
         except:
             self.abort_event.set()
+            print 'Unhandled Exception:'
             traceback.print_exc()
             if sys_exit: sys.exit(1)
             else: return 1
