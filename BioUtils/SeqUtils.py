@@ -14,11 +14,11 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from Bio.Alphabet import generic_alphabet
+from Bio.Alphabet import generic_alphabet, generic_dna
 
 from .Tools.Multiprocessing import MultiprocessingBase
 from .Tools.tmpStorage import shelf_result, roDict, register_tmp_file, cleanup_file
-from .Tools.Text import FilenameParser
+from .Tools.Text import FilenameParser, random_text
 from .Tools.Misc import mktmp_name, safe_unlink
 
 re_type = type(re.compile(''))
@@ -83,6 +83,7 @@ class SeqView(object):
         self.master = False
                 
     def load(self, files, dbname=None):
+        if isinstance(files, basestring): files = [files]
         self.close()
         valid = []
         schemas = set()
@@ -327,11 +328,18 @@ def simple_feature(start, end, fid='<unknown id>', ftype='misc_feature'):
 def pretty_rec_name(rec):
 #    print 'source: %s, id %s, desc %s' % (rec.annotations.get('source', None), rec.id, rec.description)#test
     if rec.description is None: rec.description = ''
-    return rec.annotations.get('source', rec.description.replace(rec.id, '').strip() or rec.id)
+    return (rec.annotations.get('source', None) 
+            or rec.description.replace(rec.id, '').strip() 
+            or rec.id)
 
 def copy_attrs(frec, trec):
     trec.id = frec.id
     trec.name = frec.name
     trec.description = frec.description
     return trec
+
+def random_DNA(length): return random_text(length, 'ATGC')
+def random_DNA_rec(length, sid, name='', description='', feature=''):
+    return simple_rec(random_DNA(length), sid, name, description, feature, alphabet=generic_dna)
+    
     
