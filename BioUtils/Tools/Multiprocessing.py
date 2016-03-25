@@ -20,7 +20,7 @@ from functools import partial
 from .UMP import UProcess
 from .tmpStorage import clean_tmp_files
 from .AbortableBase import AbortableBase, aborted
-from .Debug import raise_tb, raise_tb_on_error
+from .Debug import raise_tb, raise_tb_on_error, estr
 
 cpu_count = mp.cpu_count()
 
@@ -33,8 +33,7 @@ def worker(func):
             if aborted(abort_event): queue.cancel_join_thread()
             else: queue.put(result)
         except Exception, e:
-            print 'Exception in %s:' % str(func)
-            print e
+            print 'Exception in %s:\n%s' % (str(func), estr(e))
             abort_event.set()
             queue.cancel_join_thread()
         finally:
@@ -68,8 +67,7 @@ def data_mapper(func):
                 queue.put((item, result))
             except Empty: continue
             except Exception, e:
-                print 'Exception in %s:' % str(func)
-                print e
+                print 'Exception in %s\n%s:' % (str(func), estr(e))
                 abort_event.set()
                 queue.cancel_join_thread()
                 break
@@ -218,15 +216,12 @@ class Work(Sequence, Thread, AbortableBase):
                         finished_job = i
                     continue
                 except IOError, e:
-                    if e.errno == errno.EINTR:
-                        continue
+                    if e.errno == errno.EINTR: continue
                     else:
-                        print 'Unhandled IOError:'
-                        print e
+                        print 'Unhandled IOError in Work.get_results:\n%s' % estr(e)
                         raise
                 except Exception, e:
-                    print 'Unhandled Exception:'
-                    print e
+                    print 'Unhandled Exception in Work.get_results:\n%s' % estr(e)
                     raise
             if finished_job is not None:
                 del self._jobs[finished_job]
@@ -243,12 +238,10 @@ class Work(Sequence, Thread, AbortableBase):
         #IO code=4 means the same
         except IOError, e:
             if e.errno == errno.EINTR: return
-            print 'Unhandled IOError:'
-            print e
+            print 'Unhandled IOError in Work thread:\n%s' % estr(e)
             self._abort_event.set()
         except Exception, e:
-            print 'Unhandled Exception:'
-            print e
+            print 'Unhandled Exception in Work thread:\n%s' % estr(e)
             self._abort_event.set()
     #end def
     
@@ -298,6 +291,13 @@ class MultiprocessingBase(AbortableBase):
         ret = True
         for w in work: ret &= w.wait()
         return ret
+    
+    def parallelize2(self, timeout, worker, assembler, work, *args, **kwargs):
+        w = self.Work(timeout=timeout, **kwargs)
+        w.start_work(worker, work, None, *args, **kwargs)
+        w.assemble(assembler)
+        if not w.wait(): return False
+        return True
     
     def parallelize(self, timeout, worker, work, *args, **kwargs):
         #prepare and start jobs
@@ -408,9 +408,9 @@ class MPMain(object):
         except SystemExit, e:
             if sys_exit: sys.exit(e.code)
             else: return e.code
-        except:
+        except Exception, e:
             self.abort_event.set()
-            print 'Unhandled Exception:'
+            print 'Unhandled Exception in MPMain:\n%s' % estr(e) 
             traceback.print_exc()
             if sys_exit: sys.exit(1)
             else: return 1
