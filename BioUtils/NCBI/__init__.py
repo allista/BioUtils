@@ -9,4 +9,4 @@ Created on Aug 1, 2012
 from .BlastRemote import BlastWWW
 from .BlastCLI import BlastCLI
 from .BatchEntrez import BatchEntrez
-from .BlastBase import BlastFilter, num_alignments, print_hsps
+from .BlastBase import BlastFilter, BlastID, num_alignments, print_hsps
