@@ -165,12 +165,20 @@ class ProgressCounter(Progress):
             self._count += 1
 #end class
 
-@contextmanager
-def simple_timeit(name=''):
-    try:
-        t0 = time()
-        print name+'...\n'
+class simple_timeit(object):
+    def __init__(self, name=''):
+        self.name = name
+        self.timedelta = 0
+        self.seconds = 0
+        self._t0 = 0
+        
+    def __enter__(self):
+        self._t0 = time()
+        print '%s...\n' % self.name
         sys.stdout.flush()
-        yield 
-    finally:
-        print '%sElapsed time: %s\n' % (name+': ' if name else '', timedelta(seconds=time()-t0))
+
+    def __exit__(self, *exc_info):
+        self.timedelta = timedelta(seconds=time()-self._t0)
+        self.seconds = self.timedelta.total_seconds()
+        print '%sElapsed time: %s\n' % (self.name+': ' if self.name else '', self.timedelta)
+        sys.stdout.flush()
