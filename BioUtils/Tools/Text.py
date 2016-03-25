@@ -14,15 +14,17 @@ from time import ctime
 
 text_width = 80
 
-def random_text(length):
-    return ''.join(random.choice(string.ascii_uppercase + string.digits) 
-                   for _unused in xrange(length))
+def random_text(length, alphabet=string.ascii_uppercase+string.digits):
+    return ''.join(random.choice(alphabet) for _unused in xrange(length))
 
 def hr(s='', symbol='-', width=text_width):
-    return s.center(width, symbol) + '\n\n'
+    if len(s) > text_width-4:
+        lines = wrap_text(s, text_width*3/4).split('\n')
+    else: lines = [s]
+    return '\n'.join((' %s ' % l).center(width, symbol) for l in lines if l) + '\n\n'
 
 def time_hr(symbol='#'):
-    return hr(' %s ' % ctime(), symbol)
+    return hr(str(ctime()), symbol)
 
 def wrap_text(text, width=None):
     #replace intermediate whitespaces with single spaces
