@@ -79,3 +79,5 @@ def print_stack(func):
 def print_file(filename, _open=open):
     with _open(filename) as inp:
         print inp.read()
+        
+def estr(e): return str(e) or str(type(e).__name__)
