@@ -25,16 +25,25 @@ from Bio.SeqFeature import SeqFeature, FeatureLocation
 
 from BioUtils.Tools.Multiprocessing import MultiprocessingBase, cpu_count
 from BioUtils.Tools.tmpStorage import shelf_result, roDict
-
-from BioUtils.Tools.Misc import retry, mktmp_name
+from BioUtils.Tools.Text import FilenameParser
+from BioUtils.Tools.Misc import retry, mktmp_name, run_cline
 from BioUtils.Tools.Output import user_message, Progress, ProgressCounter
 from BioUtils.SeqUtils import mktmp_fasta, cat_records, Translator, get_indexes_of_genes
-from BioUtils.HMMER3.Applications import HMMSearchCommandline
+from BioUtils.HMMER3.Applications import HMMSearchCommandline, HMMBuildCommandline
+from BioUtils.AlignmentUtils import AlignmentUtils
 
-class BatchHmmer(MultiprocessingBase):
+class Hmmer(MultiprocessingBase):
     
     def __init__(self, abort_event):
-        super(BatchHmmer, self).__init__(abort_event)
+        super(Hmmer, self).__init__(abort_event)
+        
+    @staticmethod
+    def hmmbuild(alignment, outfile, name=None, **kwargs):
+        msafile = AlignmentUtils.mktmp(alignment)
+        if not name: name = FilenameParser.strip_ext(outfile)
+        return run_cline(HMMBuildCommandline(input=msafile, out=outfile, 
+                                             n=name, cpu=cpu_count, seed=0, **kwargs), 
+                         _msg = 'Unable to build HMM profile')
     
     @staticmethod
     def hmmsearch_recs(hmm, recs, **kwargs):
@@ -114,6 +123,7 @@ class BatchHmmer(MultiprocessingBase):
         print 'Done.\n'
         return hit_features 
     
+    
 #tests
 import signal
 from time import sleep
@@ -156,7 +166,7 @@ if __name__ == '__main__':
     
     hmm = u'/home/allis/Documents/INMI/Aerobic-CODH/COX-EC/COX-EC_1.2.99.2_CoxL.hmm'
     
-    hmmer = BatchHmmer(abort_event)
+    hmmer = Hmmer(abort_event)
     
     for g in genomes:
         results = hmmer.hmmsearch_genome(hmm, g, table=11, decorate=True)

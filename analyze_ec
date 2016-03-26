@@ -35,7 +35,7 @@ from BioUtils.KEGG import KEGG_cmd, KEGGRecord, KGene, Organism, Organisms
 from BioUtils.NCBI import BlastCLI, BlastWWW
 from BioUtils.NCBI.Applications import FormatDBCommandline
 from BioUtils.HMMER3.Applications import HMMBuildCommandline, HMMSearchCommandline
-from BioUtils.HMMER3 import BatchHmmer
+from BioUtils.HMMER3 import Hmmer
 from BioUtils.SeqUtils import SeqLoader, num_fasta_records, unique_records, mktmp_fasta, safe_parse, safe_write
 
 
@@ -438,7 +438,7 @@ class EC_Analyzer(MultiprocessingBase):
             print 'No genomes were loaded from provided dirs/files.\n'
             return False
         results = []
-        hmmer = BatchHmmer(self._abort_event)
+        hmmer = Hmmer(self._abort_event)
         for genome in genomes:
             result = hmmer.hmmsearch_genome(hmmfile, genome, table=11)
             if result: results.extend((result[fi][1] for fi in result))
@@ -641,8 +641,7 @@ class EC_Analyzer(MultiprocessingBase):
 
 class Main(MPMain):
     
-    def __init__(self, pid):
-        super(Main, self).__init__(pid)
+    def _setup_args(self):
         parser = argparse.ArgumentParser(description='Fetches all protein sequences ' #TODO: correct the description
                                      'for a given EC number from KEGG database, '
                                      'filters them according to given lineage '
@@ -742,6 +741,7 @@ class Main(MPMain):
         self.args = args
         
     def _main(self):
+        self._setup_args()
         self._parse_args()
         args = self.args
         #create the project
