@@ -7,19 +7,18 @@ Created on Jul 20, 2012
 
 import re
 
-from StringIO import StringIO
-
 from Bio import AlignIO
 from Bio.Alphabet import IUPAC
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.Align.Applications import MafftCommandline
 from Bio.Align import MultipleSeqAlignment
+from Bio.Phylo.Applications import FastTreeCommandline
 
-from BioUtils.SeqUtils import mktmp_fasta, SeqLoader, copy_attrs
+from BioUtils.SeqUtils import mktmp_fasta, SeqLoader, copy_attrs, num_fasta_records
 from BioUtils.Tools.Text import FilenameParser, issingleletter
 from BioUtils.Tools.Multiprocessing import cpu_count
-from BioUtils.Tools.Misc import safe_unlink
+from BioUtils.Tools.Misc import safe_unlink, run_cline, mktmp_name
 
 class AlignmentExt(MultipleSeqAlignment):
     def __init__(self, records, alphabet=None, annotations=None):
@@ -39,8 +38,8 @@ class AlignmentExt(MultipleSeqAlignment):
     def __add__(self, other):
         return self.from_msa(MultipleSeqAlignment.__add__(self, other))
     
-    def index(self, sid):
-        return self._db.get(sid, None)
+    def index(self, base_sid):
+        return self._db.get(base_sid, None)
     
     @property
     def rows(self): return xrange(len(self))
@@ -53,9 +52,9 @@ class AlignmentExt(MultipleSeqAlignment):
     
     def remove(self, *sids):
         rows = set(self.rows)
-        for sid in sids:
-            i = self.index(sid)
-            if sid is None: continue
+        for base_sid in sids:
+            i = self.index(base_sid)
+            if base_sid is None: continue
             rows.remove(i)
         rows = sorted(rows)
         return AlignmentExt([self[i] for i in rows], self._alphabet, self.annotations)
@@ -64,17 +63,17 @@ class AlignmentExt(MultipleSeqAlignment):
         '''Trim alignment termina containing gaps in columns 
         and columns containing only gaps'''
         #trim margins
-        rmargin = 0
+        lmargin = 0
         for i in self.cols:
-            rmargin = i
-            if gap not in self[:,i]: break
-        if rmargin == self.get_alignment_length()-1:
-            return AlignmentExt([])
-        lmargin = -1
-        for i in self.rcols:
             lmargin = i
             if gap not in self[:,i]: break
-        ali = self[:,rmargin:lmargin]
+        if lmargin == self.get_alignment_length()-1:
+            return AlignmentExt([])
+        rmargin = -1
+        for i in self.rcols:
+            rmargin = i+1
+            if gap not in self[:,i]: break
+        ali = self[:,lmargin:rmargin]
         #remove gaps-only
         cols = set(ali.cols)
         for i in ali.cols:
@@ -87,8 +86,7 @@ class AlignmentExt(MultipleSeqAlignment):
             if cols[i+1]-cols[i] > 1:
                 slices.append(slice(s, cols[i]+1))
                 s = cols[i+1]
-        if not slices: 
-            return AlignmentExt([])
+        slices.append(slice(s, cols[-1]+1))
         final = ali[:,slices[0]]
         for s in slices[1:]: final += ali[:,s]
         return final
@@ -108,38 +106,60 @@ class AlignmentUtils(FilenameParser):
     }
     
     @classmethod
-    def save(cls, alignments, filename, schema='clustal'):
-        try: AlignIO.write(alignments, filename, cls.schema(filename, schema))
-        except Exception, e:
-            print 'Unable to save alignments to: %s' % filename
-            print e
-            
-    @classmethod
     def load(cls, filename, schema=None):
-        try: return list(AlignIO.parse(filename, cls.schema(filename, schema)))
+        try: 
+            return [AlignmentExt.from_msa(msa) for msa in
+                    AlignIO.parse(filename, cls.schema(filename, schema))]
         except Exception, e:
-            print 'Unable to load alignments from: %s' % filename
-            print e
+            print 'Unable to load alignments from: %s\n%s' % (filename, str(e))
+            return None
+        
+    @classmethod
+    def load_first(cls, filename, schema=None):
+        alis =  cls.load(filename)
+        if not alis: return None
+        return alis[0]
+        
+    @classmethod
+    def save(cls, alignments, filename, schema=None):
+        try: 
+            AlignIO.write(alignments, filename, cls.schema(filename, schema))
+            return True
+        except Exception, e:
+            print 'Unable to save alignments to: %s\n%s' % (filename, str(e))
+            return False
+        
+    @classmethod
+    def mktmp(cls, alignments, schema='fasta'):
+        outfile = mktmp_name('.%s' % schema)
+        cls.save(alignments, outfile, schema)
     
     @classmethod
-    def align(cls, seq_records, **kwargs):
-        '''Align given sequences, return an alignment object'''
-        try:
-            msafile = mktmp_fasta(seq_records)
-            args = dict(thread=cpu_count, input=msafile)
-            if len(seq_records) < 10000: args['auto'] = True
-            else: 
-                args['parttree'] = True
-                args['partsize'] = 1000
-            cline = MafftCommandline(**args)
-            print 'Running: %s' % cline
-            out, err = cline()
-            print err
-            return AlignIO.read(StringIO(out), "fasta")
-        except Exception, e:
-            print 'AlignmentUtils.align: unable to align sequences:\n   %s' % str(e)
-            return None
-        finally: safe_unlink(msafile)
+    def align(cls, seq_records, outfile=None):
+        '''Align given sequences
+        @param seq_records: a list of SeqRecords objects
+        @param outfile: a filename for the output alignment or None
+        @return: if the outfile is none, return an AlignmentExt object;
+        otherwise return True on success. In both cases return None on error.'''
+        if not outfile: 
+            outfile = mktmp_name('.aln.fasta')
+            remove_out = True
+        else: remove_out = False
+        msafile = mktmp_fasta(seq_records)
+        args = dict(thread=cpu_count, input=msafile)
+        if len(seq_records) < 10000: 
+            args['auto'] = True
+        else: 
+            args['parttree'] = True
+            args['partsize'] = 1000
+        ali = None
+        if run_cline(MafftCommandline(**args), stdout=outfile):
+            if remove_out:
+                ali = AlignmentExt.from_msa(AlignIO.read(outfile, 'fasta'))
+            else: ali = True
+        if remove_out: safe_unlink(outfile)
+        safe_unlink(msafile)
+        return ali
     #end def
     
     @classmethod
@@ -149,7 +169,7 @@ class AlignmentUtils(FilenameParser):
         trans_seqs = cls._translate(seq_records, trans_table, force_trans_table)
         alignment  = cls.align(trans_seqs)
         untrans_aligned_seqs = cls._untranslate(alignment, seq_records)
-        return MultipleSeqAlignment(untrans_aligned_seqs)
+        return AlignmentExt(untrans_aligned_seqs)
     #end def
     
     @classmethod
