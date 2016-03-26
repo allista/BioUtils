@@ -8,7 +8,7 @@ Created on Mar 17, 2016
 
 import re
 import inspect
-from collections import Counter
+from collections import Counter, OrderedDict
 
 def num_alignments(results):
     return sum(len(rec.alignments) for rec in results)
@@ -98,18 +98,17 @@ class BlastID(object):
     UPROT   = 'uniprot'
     REFSEQN = 'refseqn'
     REFSEQP = 'refseqp'
-    LOCAL   = 'local'
+    LOCAL   = '0local'
     #regexp
-    ID_TYPES_RE = {
-                   NUC:     re.compile(r'\b([a-zA-Z]{1}\d{5}|[a-zA-Z]{2}\d{6})\b'),
-                   PROT:    re.compile(r'\b([a-zA-Z]{3}\d{5})\b'),
-                   WGS:     re.compile(r'\b([a-zA-Z]{4}\d{2}\d{6,8})\b'),
-#                   MGA:     re.compile(r'\b([a-zA-Z]{5}\d{7})\b'),
-                   UPROT:   re.compile(r'\b([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2})\b'),
-                   REFSEQN: re.compile(r'\b([ANX][CGTWSZMR]_\d+)\b'),
-                   REFSEQP: re.compile(r'\b([ANYXZW]P_\d+)\b'),
-                   LOCAL:   re.compile(r'\b(gnl\|BL_ORD_ID\|\d+)\b')
-                   }
+    ID_TYPES_RE = OrderedDict(((LOCAL,   re.compile(r'\b(gnl\|BL_ORD_ID\|\d+)\b')),
+                               (NUC,     re.compile(r'\b([a-zA-Z]{1}\d{5}(\.\d+)*|[a-zA-Z]{2}\d{6}(\.\d+)*)\b')),
+                               (PROT,    re.compile(r'\b([a-zA-Z]{3}\d{5}(\.\d+)*)\b')),
+                               (WGS,     re.compile(r'\b([a-zA-Z]{4}\d{2}\d{6,8}(\.\d+)*)\b')),
+                               #(MGA,     re.compile(r'\b([a-zA-Z]{5}\d{7})\b')),
+                               (UPROT,   re.compile(r'\b([OPQ][0-9][A-Z0-9]{3}[0-9]|[A-NR-Z][0-9]([A-Z][A-Z0-9]{2}[0-9]){1,2}(\.\d+)*)\b')),
+                               (REFSEQN, re.compile(r'\b([ANX][CGTWSZMR]_\d+(\.\d+)*)\b')),
+                               (REFSEQP, re.compile(r'\b([ANYXZW]P_\d+(\.\d+)*)\b'))))
+
     ID_TO_DB = {
                 NUC:     'nucleotide',
                 PROT:    'protein',
