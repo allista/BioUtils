@@ -10,21 +10,26 @@ import os
 import re
 import csv
 import itertools
+import tempfile
+import shutil
 
+from itertools import chain
 from random import shuffle
 
 from Bio import SeqIO
+from Bio.SeqRecord import SeqRecord
 from Bio.Blast import NCBIXML
 from Bio.Blast import Applications as BPApps
 
 from BioUtils.Tools.Multiprocessing import MultiprocessingBase
-from BioUtils.Tools.tmpStorage import shelf_result, roDict
+from BioUtils.Tools.tmpStorage import shelf_result, roDict, from_shelf
 
-from BioUtils.Tools.Misc import mktmp_name, safe_unlink
+from BioUtils.Tools.Text import random_text
+from BioUtils.Tools.Misc import mktmp_name, safe_unlink, run_cline
 from BioUtils.Tools.Output import user_message, Progress, ProgressCounter
 from BioUtils.SeqUtils import mktmp_fasta, cat_records, Translator
 
-from .Applications import BlastDBcmdCommandline
+from .Applications import BlastDBcmdCommandline, FormatDBCommandline
 from .BlastBase import _BlastBase
 
 class BlastCLI(MultiprocessingBase, _BlastBase):
@@ -69,10 +74,8 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
             cmd = cline(outfmt=5, out=bout, **kwargs)
             out, err = cmd()
             if err:
-                print '\nError while performing local %s:' % command
-                print cmd
-                print out
-                print err
+                print ('\nError while performing local %s:\n%s\n%s\n%s' 
+                       % (command, cmd, out, err))
                 return None
             if parse_results:
                 with open(bout) as inp:
@@ -94,6 +97,113 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
                                 evalue=evalue, **kwargs)
         os.unlink(qfile)
         return results
+    
+    @classmethod
+    def format_tmp_db(cls, sequences, nucleotide=True):
+        '''Create a temporary local blast database
+        @param sequences: SeqRecord object to populate the database with
+        @param nucleotide: if the sequences are nucleotide (True) or protein (False)
+        @return: database name that includes includes its path'''
+        basename = random_text(8)
+        dbdir = tempfile.mkdtemp('_blastDB')
+        sfile = mktmp_fasta(sequences)
+        if run_cline(FormatDBCommandline(input=sfile, 
+                                         protein='F' if nucleotide else 'T', 
+                                         name=basename),
+                     cwd=dbdir): 
+            return os.path.join(dbdir, basename)
+        else: shutil.rmtree(dbdir, ignore_errors=True)
+    
+    @staticmethod
+    def base_sid(s): return s.id.split(':')[0]
+    
+    @classmethod
+    def unique_seqs(cls, seqs):
+        unique = {}
+        for s in seqs:
+            sid = cls.base_sid(s)
+            if sid in unique:
+                #FIXME: need to merge sequences properly, instead of replacing 
+                if len(unique[sid]) < len(s): unique[sid] = s 
+            else: unique[sid] = s
+        return unique.values()
+    
+    def ring_blast(self, query, db='nr', evalue=0.001, blast_filter=None, depth=1, command='blastn', **kwargs):
+        '''Perform a blast search with the given query to obtain the core set of hits.
+        Make another search with each hit as a query.
+        If results of the second search contain new hits,
+        check if these are reciprocal by yet another search with them
+        and checking that results contain hits from the core set and if they are,
+        add the to the final set.
+        '''
+        if isinstance(query, SeqRecord): query = [query]
+        def blast_filter_fetch(seqs):
+            @MultiprocessingBase.data_mapper
+            @shelf_result
+            def worker(s):
+                r = self.blast_seq(s, db, evalue, command)
+                if r and blast_filter: blast_filter(r)
+                if r: return self.fetch_results(r, db, what='alignment')
+                return None
+            results = []
+            total = len(seqs)
+            prg = ProgressCounter('Performing blast search for %d sequences:' % total, total)
+            @MultiprocessingBase.results_assembler
+            def assembler(i, res):
+                if res: results.append(res)
+                prg.count()
+            with prg:
+                if not self.parallelize2(1, worker, assembler, seqs): return None
+                return results
+        
+        with user_message('RingBlast: building a core set of sequences.', '\n'):
+            core_seqs = blast_filter_fetch(query)
+            if not core_seqs: return None
+            core_seqs = self.unique_seqs(chain.from_iterable(from_shelf(r) for r in core_seqs))
+            extended_set = dict((self.base_sid(s), s) for s in core_seqs)
+            if depth <= 0: return core_seqs
+            core_db = self.format_tmp_db(core_seqs, command.endswith('n'))
+            
+        def check_sequences(seqs, next_to_process):
+            total = len(seqs)
+            prg = ProgressCounter('RingBlast: checking %d new sequences:' % total, total)
+            @MultiprocessingBase.data_mapper
+            def worker(seq):
+                res = self.blast_seq(seq, core_db, 100, command)
+                if res and blast_filter: blast_filter(res)
+                return bool(res), seq
+            @MultiprocessingBase.results_assembler
+            def assembler(i, res):
+                prg.count()
+                if not res[0]: return 
+                seq = res[1]
+                extended_set[self.base_sid(seq)] = seq
+                next_to_process.append(seq)
+            with prg: return self.parallelize2(1, worker, assembler, seqs)
+            
+        def process_sequences(seqs, _depth):
+            if _depth == 0: return
+            with user_message('RingBlast: processing %d sequences of the %d ring.' 
+                              % (len(seqs), depth-_depth+1), '\n'): 
+                next_ring = blast_filter_fetch(seqs)
+                if not next_ring: return
+                to_check = []
+                next_to_process = []
+                for n in next_ring:
+                    next_seqs = from_shelf(n)
+                    if not next_seqs: continue 
+                    for ns in next_seqs:
+                        sid = self.base_sid(ns)
+                        if sid in extended_set:
+                            #FIXME: need to merge sequences properly, instead of replacing 
+                            if len(extended_set[sid]) < len(ns):
+                                extended_set[sid] = ns 
+                        else: to_check.append(ns)
+            if not to_check or not check_sequences(to_check, next_to_process): return
+            if next_to_process: process_sequences(next_to_process, _depth-1)
+            
+        process_sequences(core_seqs, depth)
+        return extended_set.values()
 
     @classmethod
     def s2f_blast(cls, query, subject_file, evalue=0.001, command='blastn', **kwargs):
@@ -137,7 +247,8 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
                 else: hsps += alignment.hsps
         return hsps or None
     
-    def fetch_results(self, results, db, what='record'):
+    @classmethod
+    def fetch_results(cls, results, db, what='record'):
         '''Fetch records that were found by BLAST search from the database
         @param results: an iterable of Bio.Blast.Record.Blast objects (aka BlastRecords)
         @param db: name of the BLAST database to get records from
@@ -147,7 +258,7 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
         queries = []
         for record in results:
             for alignment in record.alignments:
-                q = self.Query(alignment, what)
+                q = cls.Query(alignment, what)
                 if not q: continue
                 queries.append(q)
         if not queries: return None
@@ -161,10 +272,7 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
                                           entry_batch=entry_batch)
             out, err = cline()
             if err:
-                print '\nError in blastdbcmd call'
-                print cline
-                print out
-                print err
+                print '\nError in blastdbcmd call:\n%s\n%s\n%s' % (cline, out, err)
                 return None
             #parse results
             records = list(SeqIO.parse(out_file, 'fasta'))
