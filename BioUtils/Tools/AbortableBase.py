@@ -6,6 +6,7 @@ Created on Feb 17, 2014
 '''
 
 from abc import ABCMeta
+from BioUtils.Tools.Debug import estr
 
 class DummyEvent(object):
     def is_set(self): return False
@@ -14,7 +15,9 @@ class DummyEvent(object):
 
 def aborted(abort_event):
     try: return abort_event.is_set()
-    except IOError: return True
+    except IOError, e:
+        print 'IOError while accessing abort Event:\n%s' % estr(e)#test 
+        return True
 
 class AbortableBase(object):
     '''Base class for all that need to be cleanly aborted through an event'''
