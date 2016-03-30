@@ -17,9 +17,12 @@ from BioUtils.Tools.Text import FilenameParser
 from BioUtils.Tools.Multiprocessing import MultiprocessingBase
 from BioUtils.Tools.Misc import run_cline, mktmp_name
 from BioUtils.Tools.Output import user_message
+from BioUtils.Tools.Debug import estr
 from BioUtils.Taxonomy import Lineage
 
 class PhyloUtils(MultiprocessingBase, FilenameParser):
+    schemas   = {'newick': re.compile(r'.*\.(tre|nwk|txt)$'),
+    }
     
     _organism_re = re.compile(r'\s\[.*?\]\.?$')
     
@@ -112,7 +115,17 @@ class PhyloUtils(MultiprocessingBase, FilenameParser):
             cls._set_node_taxonomy(child, top_lineage, lineage, collapse_taxa, collapse_last, collapse_min_nodes, collapse_hard, lineage_colors)
     
     @classmethod
-    def annotate_tree(cls, treefile, organisms, outfile=None, schema='newick', **kwargs):
+    def load(cls, treefile, schema=None):
+        if not os.path.isfile(treefile):
+            print 'No tree file found.'
+            return None
+        try: return dp.Tree.get(path=treefile, schema=cls.schema(treefile, schema))
+        except Exception, e:
+            print 'Error while loading %s:\n%s' % (treefile, estr(e))
+            return None
+    
+    @classmethod
+    def annotate_tree(cls, treefile, organisms, outfile=None, schema=None, **kwargs):
         '''
         Annotate input tree with taxonomy information using edge labels and colors.
         @param treefile : a file containing the tree to be annotated
@@ -131,11 +144,8 @@ class PhyloUtils(MultiprocessingBase, FilenameParser):
         @param lineage_colors : dict : a dictionary of colors as (r, g, b) tuples with lowercase taxons as keys; special value 'auto' causes to automatically assign colors
         @param top_lineage: a Lineage object to be subtracted from lineages of organisms on the tree; if not provided, it is computed automatically 
         '''
-        if not os.path.isfile(treefile):
-            print 'No tree file found.'
-            return False
         with user_message('Processing tree file...', '\n'):
-            tree = dp.Tree.get(path=treefile, schema=schema)
+            tree = cls.load(treefile, schema)
             if not tree:
                 print 'No tree loaded.'
                 return False
@@ -198,6 +208,28 @@ class PhyloUtils(MultiprocessingBase, FilenameParser):
         with user_message('Tuning nexml file for Dendroscope...'):
             cls._postprocess_nexml(xtreefile)
         return True
+    
+    @classmethod
+    def replace_node_labels(cls, treefile, labels, schema=None, outfile=None):
+        '''Reads a tree from file and replaces node labels
+        according to provided mapping. The modified tree is
+        returned as DendroPy.Tree object or is written to the 
+        provided output file.
+        @param labels: dict, replacement table
+        @param outfile: the name of the file to write the modified tree
+        '''
+        with user_message('Loading tree file...', '\n'):
+            tree = cls.load(treefile, schema)
+            if not tree:
+                print 'No tree loaded.'
+                return None
+        with user_message('Processing tree...', '\n'):
+            for leaf in tree.leaf_node_iter():
+                label = leaf.taxon.label.replace(' ', '_')
+                if label in labels:
+                    leaf.taxon.label = labels[label]
+        if outfile: tree.write(path=outfile, schema=schema)
+        return tree
     
     @staticmethod
     def _add_meta(e, content, datatype, prop, i):
