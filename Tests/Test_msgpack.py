@@ -10,8 +10,8 @@ from pydoc import locate
 from DegenPrimer.SecStructures import Duplex
 
 if __name__ == '__main__':
-    d1 = Duplex('ATGCGCTA', 'ATGCGCTA')
-    d2 = Duplex('ATGCGCTA', 'ATGCGCTA', revcomp=True)
+    d1 = Duplex('ATGCGCTA', 'ATGCGCTA', '1')
+    d2 = Duplex('ATGCGCTA', 'ATGCGCTA', '2', revcomp=True)
     anns = (123, (d1, d2), {4:'assdf'})
 
     def packb_obj(obj):

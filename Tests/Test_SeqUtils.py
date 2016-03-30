@@ -3,6 +3,7 @@ Created on Jan 15, 2016
 
 @author: allis
 '''
+
 from BioUtils.Tools.Multiprocessing import MPMain
 from BioUtils.Tools.Output import simple_timeit
 
@@ -28,13 +29,15 @@ class Test(MPMain):
         print ssv1[3]
         print
             
-        def worker(r): return r.id    
+        def worker(id, db): 
+            return len(db[id])    
+        
         for numrecs in xrange(1000, len(sv), 1000):
             svs = sv[0:numrecs]
             with simple_timeit('sequential %d' % numrecs):
-                res1 = [svs[i].id for i in range(numrecs)]
+                res1 = [len(svs[k]) for k in svs.keys()]
             with simple_timeit('parallel %d' % numrecs):
-                res2 = parallelize_work(self.abort_event, 1, 1, worker, svs, copy_data=True)
+                res2 = parallelize_work(self.abort_event, 1, 1, worker, svs.keys(), svs, init_args=lambda db: (db.clone(),))
             assert res1 == res2
             print '-'*80
         print 'Done'
