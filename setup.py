@@ -41,7 +41,8 @@ setup(name='BioUtils',
                'gbfix',
                'rename_genomes',
                'analyze_ec',
-               'split_consensus'
+               'split_consensus',
+               'nameconv'
                ],
       #data_files=[('share/applications', ['DegenPrimer.desktop'])]
       )

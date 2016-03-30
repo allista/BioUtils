@@ -1,0 +1,103 @@
+#!/usr/bin/python
+# coding=utf-8
+
+'''
+Created on Mar 28, 2016
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import os
+import sys
+import argparse
+import csv
+
+from BioUtils.AlignmentUtils import AlignmentUtils
+from BioUtils.PhyloUtils import PhyloUtils
+from BioUtils.Tools.Text import FilenameParser
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Convert an alignment to the ' 
+        'strict phylip format, encoding names of the sequences and producing a CSV ' 
+        'file with the ID-to-name mapping which could then be used to rename the '
+        'leafs of a tree build from that alignment.')
+    subparsers = parser.add_subparsers(title='actions', 
+                                       description='Available operations. Type %s <action> -h to get instructions.' % parser.prog)
+    
+    eparser = subparsers.add_parser('encode', description='Encode names of sequences in alignment and save in a restrictive alignment format.')
+    eparser.add_argument('alignments', metavar='filename',
+                        type=str, nargs='+',
+                        help='File(s) with alignments to convert.')
+    eparser.add_argument('-f', '--from-format', metavar='FLAG', 
+                        type=str,
+                        help='Input alignments are in this format (clustal, fasta, etc.). ' 
+                        'If ommited, the format is guessed by extension.')
+    eparser.add_argument('-t', '--to-format', metavar='FLAG', 
+                        type=str, default='phylip',
+                        help='Convert alignment to format (default phylip).')
+    eparser.add_argument('-g', '--global-ids', 
+                        action='store_true',
+                        help='If specified, use sequence identifiers that are unique '
+                        'across all provided alignments.')
+    eparser.add_argument('-n', '--no-encode', 
+                        action='store_false',
+                        help='Do not encode sequence labels '
+                        '(for converting to non-restrictive formats like phylip-relaxed).')
+    
+    dparser = subparsers.add_parser('decode', description='Replace node labels in a tree using a provided table.')
+    dparser.add_argument('trees', metavar='filename',
+                        type=str, nargs='+',
+                        help='File(s) with trees to process.')
+    dparser.add_argument('-f', '--tree-format', metavar='FLAG', 
+                        type=str,
+                        help='Input trees are in this format (newick, nexml, etc.). ' 
+                        'If ommited, the format is guessed by extension.')
+    dparser.add_argument('-l', '--sequence-labels', 
+                        type=str, metavar='file.csv', required=True,
+                        help='A csv file with a table of sequence labels.')
+    args = parser.parse_args()
+    
+    if hasattr(args, 'alignments'):
+        sid = 1
+        for filename in args.alignments:
+            if not args.global_ids: sid = 1
+            in_schema = args.from_format or AlignmentUtils.guess_schema(filename)
+            alignment = AlignmentUtils.load_first(filename, in_schema)
+            if not alignment:
+                print 'Unable to load alignment from: %s' % filename 
+                continue
+            basename = FilenameParser.strip_ext(filename)
+            out_schema = args.to_format or in_schema
+            csvfile = '%s.labels.csv' % basename
+            with open(csvfile, 'w') as out:
+                writer = csv.writer(out)
+                for seq in alignment:
+                    name = seq.id
+                    if seq.name and seq.name != seq.id:
+                        name += '_'+seq.name
+                    desc = seq.description.replace(seq.id, '') if seq.description else ''
+                    if desc: name += '_'+desc
+                    name.strip().replace(' ', '_').replace(',', '_')
+                    seq.id = 's%d' % sid
+                    seq.name = ''
+                    seq.description = ''
+                    writer.writerow((seq.id, name))
+                    sid += 1
+            outfile = '%s.encoded.%s' % (basename, out_schema)
+            AlignmentUtils.save(alignment, outfile, out_schema)
+            print 'Output written to:\n   %s\n   %s' % (outfile, csvfile)
+    else:
+        if not os.path.isfile(args.sequence_labels):
+            print 'No such file: %s' % args.sequence_labels
+            sys.exit(1)
+        with open(args.sequence_labels) as inp:
+            reader = csv.reader(inp)
+            labels = dict(row for row in reader)
+        for filename in args.trees:
+            in_schema = args.tree_format or PhyloUtils.guess_schema(filename)
+            ext = FilenameParser.get_ext(filename)
+            basename = FilenameParser.strip_ext(filename)
+            outfile = '%s.decoded.%s' % (basename, ext)
+            if PhyloUtils.replace_node_labels(filename, labels, in_schema, outfile):
+                print 'Output written to:\n   %s' % outfile
+    sys.exit(0)
