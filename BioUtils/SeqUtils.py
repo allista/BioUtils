@@ -81,6 +81,14 @@ class SeqView(object):
         self._ids   = []
         self.tmp_db = False
         self.master = False
+        
+    def __str__(self):
+        return '\n'.join(('SeqView:', 
+                          'dbname:  %s' % self.dbname,
+                          'tmp_db:  %s' % self.tmp_db,
+                          'master:  %s' % self.master,
+                          'upper:   %s' % self.upper,
+                          'records: %d' % len(self._ids)))
                 
     def load(self, files, dbname=None):
         if isinstance(files, basestring): files = [files]
@@ -210,8 +218,8 @@ class Translator(MultiprocessingBase):
         try: 
             tsec = srec.seq.translate(table)
             if tsec[-1] == '*': tsec = tsec[:-1]
-            fid = f.qualifiers.get('locus_tag', [None])[0]
-            if not fid: fid = '%s_f%d' % (rec.id, fi)
+            try: fid = f.qualifiers['locus_tag'][0]
+            except KeyError: fid = '%s_f%d' % (rec.id, fi)
             trec = SeqRecord(tsec,
                              id=fid, name=rec.name,
                              description=rec.description,
@@ -326,9 +334,9 @@ def simple_feature(start, end, fid='<unknown id>', ftype='misc_feature'):
     return SeqFeature(loc, type=ftype, id=fid)
 
 def pretty_rec_name(rec):
-#    print 'source: %s, id %s, desc %s' % (rec.annotations.get('source', None), rec.id, rec.description)#test
+#    print 'source: %s, id %s, desc %s' % (rec.annotations.get('source'), rec.id, rec.description)#test
     if rec.description is None: rec.description = ''
-    return (rec.annotations.get('source', None) 
+    return (rec.annotations.get('source') 
             or rec.description.replace(rec.id, '').strip() 
             or rec.id)
 
