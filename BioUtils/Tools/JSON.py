@@ -108,8 +108,8 @@ class JSONable(object):
         with inp: dct = _load(inp)
         assert isinstance(dct, dict), \
         '%s should contain a single top-level JSON object' % filename
-        assert dct.get(cls._cls_key, None) == cls.qualname(), \
-        'Type mismatch: trying to load %s, but %s was saved' % (cls.qualname(), dct.get(cls._cls_key, None))
+        assert dct.get(cls._cls_key) == cls.qualname(), \
+        'Type mismatch: trying to load %s, but %s was saved' % (cls.qualname(), dct.get(cls._cls_key))
         return cls.from_dict(dct.get(cls._data_key, {}))
 
 
@@ -132,11 +132,11 @@ class JSONattrs(JSONable):
         if isinstance(obj, list):
             return [cls._unpack_obj(it) for it in obj]
         if isinstance(obj, dict):
-            T = obj.get(cls._cls_key, None)
+            T = obj.get(cls._cls_key)
             if not T: return obj
             T = locate(T)
             if not T: return obj
-            data = obj.get(cls._data_key, None)
+            data = obj.get(cls._data_key)
             if data is None: return T()
             if issubclass(T, JSONable):
                 return T.from_dict(data)
@@ -204,8 +204,8 @@ if __name__ == '__main__':
             
     class Test3(JSONattrs):
         def __init__(self, **kwargs):
-            self._A = Test(kwargs.get('a', None),kwargs.get('b', None))
-            self._B = Test1(kwargs.get('b', None),kwargs.get('a', None), 5, 9)
+            self._A = Test(kwargs.get('a'),kwargs.get('b'))
+            self._B = Test1(kwargs.get('b'),kwargs.get('a'), 5, 9)
             self._C = Test2()
             
     t = Test3(a=3,b=7)

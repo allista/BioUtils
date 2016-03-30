@@ -127,7 +127,7 @@ def to_shelf(result):
 
 def from_shelf(filename, cleanup=True):
     with roDict(filename) as db:
-        return db.get('result', None)
+        return db.get('result')
     if cleanup: cleanup_file(filename)
 
 def shelf_result(func, *args, **kwargs):

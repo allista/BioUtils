@@ -52,9 +52,9 @@ def data_mapper(func):
     func = raise_tb_on_error(func)
     def mapper(queue, abort_event, in_queue, data, *args, **kwargs):
         if kwargs.get('copy_data', False): data = deepcopy(data)
-        init = kwargs.get('init_args', None)
+        init = kwargs.get('init_args')
         if init: args = init(*args)
-        init = kwargs.get('init_data', None)
+        init = kwargs.get('init_data')
         if init: data = init(data)
         while True:
             try: 
@@ -146,7 +146,7 @@ class Work(Sequence, Thread, AbortableBase):
         self._timeout   = timeout
         self.assembler  = None
         self._assembler_args = None
-        self._counter   = kwargs.get('counter', None)
+        self._counter   = kwargs.get('counter')
         self._launched  = False
     #end defs
     
