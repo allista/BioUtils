@@ -69,10 +69,10 @@ class Lineage(tuple):
     
     @classmethod
     def from_record(cls, rec):
-        taxons = rec.annotations.get('taxonomy', None)
-        if taxons: return cls.from_iter(taxons)
-        m = Lineage.taxonomy_re.search(rec.name+' '+rec.description)
-        return cls(m.group(2) if m else cls.unknown)
+        try: return cls.from_iter(rec.annotations['taxonomy'])
+        except KeyError:
+            m = Lineage.taxonomy_re.search(rec.name+' '+rec.description)
+            return cls(m.group(2) if m else cls.unknown)
     
     @classmethod
     def common(cls, lineages, delimiter=';'):
@@ -141,7 +141,7 @@ class Organism(object):
     @classmethod
     def from_record(cls, rec):
         return cls(rec.id, 
-                   rec.annotations.get('organism', None) 
+                   rec.annotations.get('organism') 
                    or pretty_rec_name(rec),
                    Lineage.from_record(rec))
 #end class
