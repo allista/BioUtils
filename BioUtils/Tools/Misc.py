@@ -70,9 +70,8 @@ class ListDB(object):
         return self._db[key]
     
     def __setitem__(self, key, value):
-        l = self._db.get(key, None)
-        if l is None: self._db[key] = [value]
-        else: l.append(value)
+        try: self._db[key].append(value)
+        except KeyError: self._db[key] = [value]
         
     def __iter__(self): return self._db.__iter__()
     
