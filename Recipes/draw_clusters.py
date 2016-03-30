@@ -318,6 +318,6 @@ if __name__ == '__main__':
     from multiprocessing import Event
     abort_event = Event()
     genomes_dir = u'/home/allis/Dropbox/Science/Микра/Thermococcus/sequence/GenBank/Thermococcus'
-    FC_cluster(abort_event, color=False, force=False, add_crosslinks=True)
+    FC_cluster(abort_event, color=True, force=False, add_crosslinks=False)
 #    CO_cluster(color=False, force=False, add_crosslinks=False)
     print 'Done'
