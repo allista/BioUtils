@@ -103,6 +103,7 @@ class AlignmentUtils(FilenameParser):
     schemas   = {'fasta':   SeqLoader.fasta_re,
                  'clustal': re.compile(r'.*\.aln$'),
                  'nexus':   re.compile(r'.*\.nex$'),
+                 'phylip':  re.compile(r'.*\.phy$'),
     }
     
     @classmethod
