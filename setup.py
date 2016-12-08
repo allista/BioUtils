@@ -42,7 +42,14 @@ setup(name='BioUtils',
                'rename_genomes',
                'analyze_ec',
                'split_consensus',
-               'nameconv'
+               'nameconv',
+               'assembly2sequence',
+               'make_fasta_db',
+               'build_tree_of_homologs',
+               'hmm_annotate_genomes',
+               'blast_annotate_genomes',
+               'find_clusters',
+               'draw_clusters',
                ],
       #data_files=[('share/applications', ['DegenPrimer.desktop'])]
       )

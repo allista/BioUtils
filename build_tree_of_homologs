@@ -1,0 +1,234 @@
+#!/usr/bin/python
+# coding=utf-8
+
+'''
+Created on Mar 15, 2016
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import os
+
+from Bio.Alphabet import DNAAlphabet, ProteinAlphabet
+
+from BioUtils.NCBI import BlastWWW
+from BioUtils.Tools.Output import user_message
+from BioUtils.Tools.Multiprocessing import MPMain
+from BioUtils.NCBI import BlastCLI, UniqueIDs
+from BioUtils.SeqUtils import safe_write, load_files, unique_records
+from BioUtils.AlignmentUtils import AlignmentUtils
+from BioUtils.PhyloUtils import PhyloUtils
+from BioUtils.Taxonomy import Organisms
+
+
+class Main(MPMain):
+    description = 'Blast provided sequence, get the results, align everything and build a fast-ML tree.'
+
+    def _main(self):
+        self.argument('project', metavar='project name', default=None,
+                      type=str, help='The basename of current analysis project.')
+        self.argument('email', metavar='you.address@domain.com',
+                      type=str, help='Your email is required by NCBI to use its online services through scripting API.')
+        self.argument('files', metavar='/path/to/file', nargs='+',
+                      type=str, help='Paths to files containing query sequences.')
+
+        self.argument('-f', '--force', action='store_true',
+                      help='Perform all computations, even if cached results are available.')
+        # blast arguments
+        self.argument('-L', '--blast-batch-length', default=3000, metavar='int',
+                      type=int, help='Combine query sequences into batch query no longer that this.')
+        self.argument('-E', '--evalue', default=0.01, metavar='float',
+                      type=float, help='Filter out results with an evalue greater then this.')
+        self.argument('-s', '--min-bit-score', default=500, metavar='float',
+                      type=float, help='Filter out results with a bitscore less then this.')
+        self.argument('-i', '--min-identity', default=0.5, metavar='float',
+                      type=float, help='Filter out alignments with identity percent less then this.')
+        self.argument('-l', '--min-length', default=0.9, metavar='float',
+                      type=float, help='Filter out results the length less then min-length*query-length. '
+                                       'Should be in the [0.2, 1) interval.')
+        self.argument('-F', '--filter-homologues', default=-1,
+                      type=float,
+                      help='Filter out close homologues from blast results using percent of identity cutoff.')
+        # tree arguments
+        self.argument('-c', '--collapse-last', action='store_true',
+                      help='Collapse outermost nodes with number of leafs >= N to '
+                           'trapezium leafs in Dendroscope.')
+        self.argument('-C', '--collapse-hard', action='store_true',
+                      help='When collapsing a genus, actually remove its subtree, '
+                           'leaving only one labeled leaf. Usefull for huge trees.')
+        self.argument('-r', '--reroot-at', metavar='sequence ID', default=None,
+                      type=str, help='Reroot the tree using this sequence as outgroup. Accepts special values: '
+                                     '"midpoint" and "unroot".')
+        self.argument('-m', '--min-support', default=None, metavar='float',
+                      type=float, help='Collapse splits with support < min-support.')
+        self.argument('-M', '--mark-leafs', default=None, metavar='accession',
+                      type=str, help='Mark leafs specified by accession number in Dendroscope.')
+        self.argument('--colors', metavar='"archaea:#f3ad6;bacteria:blue"',
+                      type=str, help='Colorize tree edges by phylogeny using provided colors '
+                                     'for Dendroscope. Both html notation and predefined color '
+                                     'names are supported.')
+        self.parse_args()
+        # get the query
+        query = load_files(self.abort_event, self.args.files, guess_alphabet=True)
+        if not query:
+            print 'No sequence was loaded from %s' % self.args.files
+            return 1
+        # check queries alphabet
+        alphabets = set()
+        for q in query:
+            if isinstance(q.seq.alphabet, ProteinAlphabet):
+                alphabets.add(1)
+            elif isinstance(q.seq.alphabet, DNAAlphabet):
+                alphabets.add(2)
+            else: alphabets.add(0)
+            if len(alphabets) > 1:
+                print 'All query sequences must have the same alphabet.\n' \
+                      'Only extended protein and ambiguous DNA alphabets are supported.'
+                return 11
+        # prepare filter
+        b_filter = UniqueIDs([rec.id for rec in query])
+        b_filter.AndFilter(lambda a: a.hsps[0].align_length > len(query)*self.args.min_length)
+        b_filter.AndFilter(lambda a: all(hsp.score > self.args.min_bit_score for hsp in a.hsps))
+        b_filter.AndFilter(lambda a: all(hsp.identities / float(hsp.align_length) > self.args.min_identity
+                                     for hsp in a.hsps))
+        # check query sequences
+        if isinstance(query[0].seq.alphabet, ProteinAlphabet):
+            prog = 'blastp'
+            edb = 'protein'
+            what = 'record'
+            db = 'nr'
+        else:
+            prog = 'blastn'
+            edb = 'nucleotide'
+            what = 'alignment'
+            db = 'nt'
+        proj = self.args.project or ('%s-%s' % (query[0].id, prog))
+        pdir = proj+'.files'
+        try: os.mkdir(pdir)
+        except: pass
+        def pfile(suffix): return os.path.join(pdir, proj+suffix)
+        print ('Project name: %s\n'
+               'Query type:   %s\n'
+               'Project folder: %s' % (proj, edb, pdir))
+        # prepare batch queries
+        batches = [[]]
+        batch = batches[0]
+        batch_len = 0
+        for q in query:
+            qlen = len(q)
+            if batch and batch_len+qlen > self.args.blast_batch_length:
+                batch = [q]
+                batch_len = qlen
+                batches.append(batch)
+            else:
+                batch.append(q)
+                batch_len += qlen
+        # perform blast search
+        blast = BlastCLI(self.abort_event)
+        blast_results = []
+        nbatches = len(batches)
+        for i, batch in enumerate(batches):
+            blast_file = pfile('-%03d.xml' % i)
+            if self.args.force or not os.path.isfile(blast_file) or not os.path.getsize(blast_file):
+                print ('Performing remote blast query %d/%d (%d letters)' %
+                       (i+1, nbatches, sum(len(seq) for seq in batch)))
+                results = blast.blast_seq(batch, db, command=prog, remote=True, save_results_to=blast_file,
+                                          parse_results=True)
+                self.args.force = True
+            else:
+                print '%s already exists. Parsing blast results.' % blast_file
+                results = BlastWWW.load_results(blast_file)
+            if blast.have_alignments(results): blast_results.extend(results)
+        nresutls = blast.num_alignments(blast_results)
+        if nresutls == 0:
+            print 'No blast results.'
+            return 2
+        # filter blast results
+        print 'Blast returned %d alignments.' % nresutls
+        b_filter(blast_results)
+        nseqs = blast.num_alignments(blast_results)
+        blast.print_hsps(blast_results)
+        print '%d alignments left after filtering.' % nseqs
+        if nseqs == 0: return 3
+
+        # fetch sequences from GenBank
+        seqfile = pfile('.gb')
+        if self.args.force or not os.path.isfile(seqfile):
+            print 'Fetching blast results using Entrez'
+            seqs = BlastWWW.fetch_results(self.args.email, blast_results, from_dbs=[edb], what=what)
+            if seqs: safe_write(seqs, seqfile, 'gb')
+            self.args.force = True
+        else:
+            print '%s already exists. Loading previously fetched results.' % seqfile
+            seqs = load_files(self.abort_event, [seqfile])
+        if not seqs:
+            print 'No blast records were fetched.'
+            return 4
+        nseqs = len(seqs)
+        for s in seqs: print '%s %s' % (s.id, s.description)
+        print 'Fetched %d sequences from GenBank.\n' % nseqs
+
+        # get sequence of interest ids
+        marks = []
+        if self.args.mark_leafs:
+            if os.path.isfile(self.args.mark_leafs):
+                print 'Reading additional marker IDs from: %s' % self.args.mark_leafs
+                with open(self.args.mark_leafs) as inp:
+                    for l in inp:
+                        line = l.strip().split()
+                        if not line: continue
+                        if line[0].startswith('#'): continue
+                        marks.append(line[0].strip())
+            else:
+                print 'Parsing additional marker IDs from command line: %s' % self.args.mark_leafs
+                addons = [ID for ID in (sid.strip() for sid in self.args.mark_leafs.split()) if ID]
+                if addons: marks += addons
+        if marks: print 'Additional markers: %s\n' % ', '.join(marks)
+
+        # filter sequences
+        filtered = pfile('.filtered.gb')
+        if self.args.force or not os.path.isfile(filtered):
+            if self.args.filter_homologues > 0:
+                min_identity = min(self.args.filter_homologues, 1)
+                seqs = blast.filter_homologues(seqs, min_identity, marks)
+            if seqs:
+                safe_write(seqs, filtered, 'gb')
+                self.args.force = True
+        else:
+            seqs = load_files(self.abort_event, [filtered])
+        seqs = list(unique_records(query, seqs))
+        nseqs = len(seqs)
+        print '%d sequences left after filtering.\n' % nseqs
+        if nseqs == 0: return 5
+
+        # alignment sequences
+        alifile = pfile('.aln.fasta')
+        if self.args.force or not os.path.isfile(alifile):
+            with user_message('\nAligning retrieved sequences...', '\n'):
+                if not AlignmentUtils.align(seqs, outfile=alifile): return 6
+            self.args.force = True
+        else: print '\n%s already exists. Using existing alignment.' % alifile
+
+        # build a tree
+        treefile = pfile('.aln.tre')
+        if self.args.force or not os.path.isfile(treefile):
+            if not PhyloUtils.build_fast_tree(alifile, treefile): return 7
+        else: print '\n%s already exists. Using existing tree file.' % treefile
+
+        # annotate the tree
+        organisms = Organisms.from_records(seqs)
+        colors = PhyloUtils.parse_colors(self.args.colors) if self.args.colors else None
+        marks += [q.id for q in query]
+        if PhyloUtils.annotate_tree(treefile, organisms,
+                                    beautify_leafs=True,
+                                    reroot_at=self.args.reroot_at,
+                                    collapse_last=self.args.collapse_last or self.args.collapse_hard,
+                                    collapse_hard=self.args.collapse_hard,
+                                    mark_leafs=set(marks),
+                                    min_support=self.args.min_support,
+                                    lineage_colors=colors
+                                    ): return 0
+        return 8
+
+if __name__ == '__main__':
+    Main(run=True)

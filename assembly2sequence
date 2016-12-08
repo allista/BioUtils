@@ -1,0 +1,55 @@
+#!/usr/bin/python
+# coding=utf-8
+
+'''
+Created on Mar 16, 2016
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import os
+from Bio.Alphabet import generic_dna
+from BioUtils.Tools.Multiprocessing import MPMain
+from BioUtils.SeqUtils import simple_rec, SeqLoader, pretty_rec_name, safe_write, copy_attrs, simple_feature
+
+
+class Main(MPMain):
+    description = 'Merge assembly contigs into a single sequence delimited with gaps.'
+
+    def _main(self):
+        self.argument('path',
+                      type=str, nargs='+',
+                      help='Path to a file(s) with the assembly or a directory of such files.')
+        self.parse_args()
+
+        loader = SeqLoader(self.abort_event)
+        if len(self.args.path) == 1:
+            path = self.args.path[0]
+            if os.path.isdir(path):
+                allseqs = loader.load_dir(path)
+            elif os.path.isfile(path):
+                allseqs = loader.load_file(path)
+            else:
+                print 'No such file or directory: %s' % path
+                return 1
+        else:
+            allseqs = loader.load_files(self.args.path)
+
+        if not allseqs: 
+            print 'No files were loaded'
+            return 2
+        allseqs.sort(key=lambda r: r.name)
+        result = simple_rec('', '_id', alphabet=generic_dna)
+        for seq in allseqs:
+            seq.features.append(simple_feature(0, len(seq), seq.name, 'contig', {'name': seq.name}))
+            if len(result) > 0:
+                result += simple_rec('N'*20, 'gap', feature='gap', alphabet=generic_dna)
+            result += seq
+        copy_attrs(allseqs[0], result)
+        result.seq.alphabet = generic_dna
+        filename = pretty_rec_name(result).replace(' ', '_').strip('.')+'_'+result.id+'.merged.gb'
+        if safe_write(result, filename):
+            print '%s saved.' % filename
+
+if __name__ == '__main__':
+    Main(run=True)

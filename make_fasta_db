@@ -1,0 +1,25 @@
+#!/usr/bin/python
+# coding=utf-8
+
+"""
+Created on Mar 19, 2016
+
+@author: Allis Tauri <allista@gmail.com>
+"""
+
+from BioUtils.SeqUtils import SeqView, safe_write
+from BioUtils.Tools.Multiprocessing import MPMain
+
+class Main(MPMain):
+    def _main(self):
+        self.argument('dbname', type=str,
+                      help='Base name of the database to create. Extension will be added automatically.')
+        self.argument('filename', type=str, nargs='+',
+                      help='Sequence file(s). If several files are provided they should be of the same type (genbank, fasta, etc).')
+        self.parse_args()
+        db = SeqView()
+        db.load(self.args.filename)
+        safe_write(db, self.args.dbname+'.fasta')
+
+if __name__ == '__main__':
+    Main(run=True)

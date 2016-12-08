@@ -1,0 +1,70 @@
+#!/usr/bin/python
+# coding=utf-8
+
+import os
+
+from Bio.Alphabet import generic_dna
+
+from BioUtils.AlignmentUtils import AlignmentUtils
+from BioUtils.Tools.Text import FilenameParser
+from BioUtils.Tools.Multiprocessing import MPMain
+from BioUtils.SeqUtils import SeqView, pretty_rec_name, safe_write, filename_for_record
+from BioUtils.HMMER3 import Hmmer
+
+
+class Main(MPMain):
+    description = 'Use a HMM profile to find patterns and annotate given genomes.'
+
+    def _main(self):
+        self.argument('files', metavar='/path/to/file', nargs='+',
+                      type=str, help='Paths to files with genomes.')
+
+        self.argument('-H', '--hmm', metavar='profile.hmm', default='',
+                      type=str, help='Search for patterns using this HMM profile.')
+
+        self.argument('-A', '--alignment', metavar='alignment.file', default='',
+                      type=str, help='Build a HMM profile from this alignment and use it.')
+
+        self.argument('-t', '--translation-table', metavar='number', default=11,
+                      type=int, help='A translation table to use to translate genomes.')
+
+        self.parse_args()
+        #check arguments
+        if not os.path.isfile(self.args.hmm) and not os.path.isfile(self.args.alignment):
+            print 'Either a HMM profile or an alignment should be provided to perform the search.'
+            return 1
+        #load files
+        genomes = SeqView.safe_load(self.args.files)
+        if not genomes: return 2
+        #creating Hmmer
+        hmmer = Hmmer(self.abort_event)
+        #prepare HMMS
+        if self.args.hmm: hmm = self.args.hmm
+        else:
+            ali = AlignmentUtils.load_first(self.args.alignment)
+            if ali is None:
+                print 'Unable to load alignment from: %s' % self.args.alignment
+                return 3
+            hmm = self.args.alignment+'.hmm'
+            hmm_name = FilenameParser.strip_ext(os.path.basename(self.args.alignment))
+            print 'Building HMM profile: %s' % hmm
+            if not hmmer.hmmbuild(ali, hmm, hmm_name):
+                return 4
+            print 'Done'
+        #process genomes
+        for g in genomes:
+            print 'Processing: %s' % pretty_rec_name(g)
+            results = hmmer.hmmsearch_genome(hmm, g, table=self.args.translation_table, decorate=True)
+            if results:
+                fname = filename_for_record(g, 'hmm_annotated.gb')
+                print 'Saving results to: %s' % fname
+                if os.path.isfile(fname):
+                    os.rename(fname, fname+'.back')
+                g.seq.alphabet = generic_dna
+                safe_write(g, fname)
+            else: print 'No patterns were found.'
+            print ""
+        print 'Done.'
+
+if __name__ == '__main__':
+    Main(run=True)

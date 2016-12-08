@@ -1,0 +1,69 @@
+#!/usr/bin/python
+# coding=utf-8
+
+import os
+from functools import partial
+
+from BioUtils.NCBI import BlastCLI
+
+from Bio.Alphabet import generic_dna, ProteinAlphabet
+
+from BioUtils.Tools.Multiprocessing import MPMain
+from BioUtils.SeqUtils import SeqView, pretty_rec_name, safe_write, SeqLoader, filename_for_record
+
+
+class Main(MPMain):
+    description = 'Use blast(p/n) to find patterns and annotate given genomes.'
+
+    def _main(self):
+        self.argument('query', metavar='/path/to/sequence.file',
+                      type=str, help='Search for patterns using sequences from this file.')
+
+        self.argument('files', metavar='/path/to/file', nargs='+',
+                      type=str, help='Paths to files with genomes.')
+
+        self.argument('-e', '--evalue', metavar='float', default=0.0001,
+                      type=float, help='E-value results filter.')
+
+        self.argument('-t', '--translation-table', metavar='number', default=11,
+                      type=int, help='A translation table to use to translate genomes '
+                                     'if protein sequences are given.')
+
+        self.parse_args()
+        #load query
+        if not os.path.isfile(self.args.query):
+            print 'File not found: %s' % self.args.query
+            return 1
+        query = SeqLoader.load_file(self.args.query, guess_alphabet=True)
+        if not query:
+            print 'No sequences were loaded from: %s' % self.args.query
+            return 2
+        #check alphabet
+        alphabet = query[0].seq.alphabet
+        if not all(q.seq.alphabet == alphabet for q in query):
+            print 'All query sequences should be of the same type (protein or nucleotide)'
+            return 3
+        #load genomes
+        genomes = SeqView.safe_load(self.args.files)
+        if not genomes: return 4
+        #process genomes
+        blast = BlastCLI(self.abort_event)
+        protein = isinstance(alphabet, ProteinAlphabet)
+        suffix = 'blastp_annotated.gb' if protein else 'blastn_annotated.gb'
+        annotate = blast.blastp_annotate if protein else partial(blast.blastn_annotate,
+                                                                 table=self.args.translation_table)
+        for g in genomes:
+            print 'Processing: %s' % pretty_rec_name(g)
+            if annotate(query, g, evalue=self.args.evalue):
+                fname = filename_for_record(g, suffix)
+                print 'Saving results to: %s' % fname
+                if os.path.isfile(fname):
+                    os.rename(fname, fname+'.back')
+                g.seq.alphabet = generic_dna
+                safe_write(g, fname)
+            else: print 'No patterns were found.'
+            print ""
+        print 'Done.'
+
+if __name__ == '__main__':
+    Main(run=True)

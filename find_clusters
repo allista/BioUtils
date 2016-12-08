@@ -1,0 +1,412 @@
+#!/usr/bin/python
+# coding=utf-8
+
+import os
+
+from reportlab.lib import colors
+
+from BioUtils.Tools.Output import ProgressCounter
+from bisect import bisect_left
+from collections import Counter
+
+from Bio.SeqFeature import FeatureLocation, SeqFeature, CompoundLocation
+
+from BioUtils.Tools.Text import FilenameParser
+
+from Bio.Alphabet import generic_dna
+
+from BioUtils.Tools.Multiprocessing import MPMain, MultiprocessingBase, ordered_results_assembler
+from BioUtils.SeqUtils import SeqView, safe_write, filename_for_record, all_CDS, rec_name_with_id
+
+
+class TaggedGene(object):
+    class Tag(object):
+        def __init__(self, name, coverage):
+            self.name = name
+            self.coverage = coverage
+
+        def better(self, other):
+            return self.coverage > other.coverage
+
+        def update(self, coverage):
+            self.coverage = max(self.coverage, coverage)
+
+        def __str__(self):
+            return '%s %.1f%%' % (self.name, self.coverage*100)
+
+        def __repr__(self): return str(self)
+
+    def __init__(self, index, gene, tag_feature, intersection):
+        self.gi = index
+        self.gene = gene
+        self._glen = float(len(gene))
+        self.tag = None
+        self.update_tag(tag_feature, intersection)
+
+    @property
+    def start(self):
+        return self.gene.location.start
+
+    @property
+    def end(self):
+        return self.gene.location.end
+
+    @property
+    def strand(self):
+        return self.gene.location.strand
+
+    def update_tag(self, tag_feature, intersection):
+        name = tag_feature.qualifiers.get('blast_tag')
+        if name: name = name[0]
+        else: raise ValueError('tag_feature should contain blast_tag qualifier')
+        try: identities = int(tag_feature.qualifiers['identities'][0])
+        except: identities = 0
+        try: mult = int(tag_feature.qualifiers['letter_length'][0])
+        except: mult = 1
+        coverage = identities * mult * intersection/float(len(tag_feature))/self._glen
+        tag = self.Tag(name, coverage)
+        if self.tag is None or tag.better(self.tag):
+            self.tag = tag
+
+    def update(self, other):
+        if self.gi != other.gi: return
+        if self.tag is None or other.tag.better(self.tag):
+            self.tag = other.tag
+
+
+    def __str__(self): return str(self.tag)
+
+    def __repr__(self): return str(self)
+
+
+class GenesTagger(object):
+    def __init__(self, gene_features, parent_name):
+        self.pname = parent_name
+        #check for compound locations
+        new_genes = []
+        remove = set()
+        gene_features = set(gene_features)
+        for f in gene_features:
+            if isinstance(f.location, CompoundLocation):
+                for part in f.location.parts:
+                    new_f = SeqFeature(part,f.type,id=f.id,qualifiers=f.qualifiers)
+                    new_genes.append(new_f)
+                remove.add(f)
+        if new_genes:
+            gene_features -= remove
+            gene_features.update(new_genes)
+        self._genes = sorted(gene_features, key=lambda a: a.location.end)
+        self._ends = [f.location.end for f in self._genes]
+        self._len = len(self._genes)
+        self._last = self._len-1
+
+    def __getitem__(self, item):
+        return self._genes[item]
+
+    def __len__(self): return self._len
+
+    @staticmethod
+    def _intersection(a, b):
+        s = max(a.location.start, b.location.start)
+        e = min(a.location.end, b.location.end)
+        return e-s if s < e else 0
+
+    def _insert_new_CDS(self, i, f):
+        print 'WARNING: %s probably have missing CDS annotation at: %s' % (self.pname, str(f.location))
+        f.type = 'CDS'
+        self._genes.insert(i, f)
+        self._ends.insert(i, f.location.end)
+        self._len += 1
+        self._last += 1
+
+    def taged_genes(self, tag, min_coverage=0, same_strand=False):
+        i = bisect_left(self._ends, tag.location.start)
+        if i == self._last:
+            self._insert_new_CDS(i, tag)
+            return [TaggedGene(i, tag, tag, len(tag))]
+        intersection = []
+        for gi, g in enumerate(self._genes[i:]):
+            if same_strand and g.location.strand != tag.location.strand: continue
+            _i = self._intersection(tag, g)
+            if _i: intersection.append((gi+i, g, _i))
+        if not intersection:
+            tag.type = 'CDS'
+            self._insert_new_CDS(i, tag)
+            return [TaggedGene(i, tag, tag, len(tag))]
+        return [TaggedGene(gi, g, tag, _i)
+                for gi, g, _i in intersection
+                if float(_i)/len(g) > min_coverage]
+
+
+class GeneCluster(object):
+    def __init__(self, max_gap):
+        self._genes = dict()
+        self.max_gi = 0
+        self.max_gap = max_gap
+
+    def add(self, gene):
+        if self._genes and gene.gi-self.max_gi-1 > self.max_gap: return False
+        g = self._genes.get(gene.gi)
+        if not g:
+            self._genes[gene.gi] = gene
+            self.max_gi = max(gene.gi, self.max_gi)
+        else: g.update(gene)
+        return True
+
+    @property
+    def gis(self):
+        return sorted(self._genes.keys())
+
+    @property
+    def genes(self):
+        return [self._genes[gi] for gi in self.gis]
+
+    @property
+    def tags(self):
+        return [self._genes[gi].tag.name for gi in self.gis]
+
+    @property
+    def location(self):
+        if not self._genes: return None
+        start = -1; end = -1
+        strand = Counter()
+        for g in self._genes.values():
+            s = g.start; e = g.end
+            if start < 0 or s < start: start = s
+            if e > end: end = e
+            strand[g.strand] += 1
+        return FeatureLocation(start, end, strand.most_common(1)[0][0])
+
+    def __str__(self):
+        loc = self.location
+        genes = self.genes
+        if loc.strand == -1: genes = genes[::-1]
+        return '%s: [%s]' % (str(self.location), ', '.join(str(g) for g in genes))
+
+    def __repr__(self): return str(self)
+
+
+class ClusterDef(object):
+    class _Tag(object):
+        def __init__(self, tags):
+            if not tags:
+                raise  ValueError('tags should contain at least one tag')
+            self.single = len(tags) == 1
+            self.value = tags[0] if self.single else set(tags)
+
+        def match(self, tag):
+            if self.single:
+                return tag == self.value
+            return tag in self.value
+
+        def __eq__(self, other):
+            return self.match(other)
+
+        def __str__(self):
+            if self.single:
+                return self.value
+            return '|'.join(self.value)
+
+    def __init__(self, string):
+        self.tags = [self._Tag(t) for t in (t.strip().split('|') for t in string.split())]
+
+    def missing(self, tags):
+        self_set = set(self.tags)
+        for other in tags:
+            remove = None
+            for tag in self_set:
+                if tag.match(other):
+                    remove = tag
+                    break
+            if remove:
+                self_set.remove(remove)
+                if not self_set: break
+        return self_set
+
+    def match(self, tags):
+        return not self.missing(tags)
+
+    def match_strict(self, tags):
+        start = self.tags.index(tags[0])
+        return all(self.tags[start+i].match(t) for i, t in enumerate(tags))
+
+    def __contains__(self, item):
+        return any(t.match(item) for t in self.tags)
+
+    def __iter__(self):
+        return self.tags.__iter__()
+
+    def __str__(self):
+        return ', '.join(str(t) for t in self.tags)
+
+
+class ClusterFinder(MultiprocessingBase):
+
+    def __init__(self, abort_event, cluster_file, max_insertions, min_coverage, strict_order):
+        super(ClusterFinder, self).__init__(abort_event)
+        self.full_cluster = None
+        self.core_cluster = None
+        self.max_insertions = max_insertions
+        self.min_coverage = min_coverage
+        self.strict_order = strict_order
+        if not os.path.isfile(cluster_file):
+            raise ValueError('File not found: %s' % cluster_file)
+        with open(cluster_file) as inp:
+            for line in inp:
+                if not self.full_cluster: self.full_cluster = ClusterDef(line)
+                if not self.core_cluster: self.core_cluster = self.full_cluster
+                else:
+                    self.core_cluster = ClusterDef(line)
+                    break
+        if not self.core_cluster:
+            raise ValueError('No gene tags were loaded from: %s' % cluster_file)
+        self.gene_colors = self._generate_gene_colors()
+        self.cluster_name = FilenameParser.strip_ext(os.path.basename(cluster_file))
+        self.suffix = self.cluster_name + '-cluster.gb'
+
+    def _generate_gene_colors(self):
+        full_gene_set = set()
+        full_gene_row = []
+        def add_gene(name):
+            if name in full_gene_set: return
+            full_gene_set.add(name)
+            full_gene_row.append(name)
+        for tag in self.full_cluster:
+            if tag.single: add_gene(tag.value)
+            else: [add_gene(name) for name in tag.value]
+        ngenes = float(len(full_gene_row))-1
+        middle = ngenes/2.0
+        gene_colors = {}
+        for i, gene in enumerate(full_gene_row):
+            t = i/ngenes
+            if i < middle:
+                c = colors.linearlyInterpolatedColor(colors.Color(1, 0, 0, 1), colors.Color(0, 1, 0, 1), 0, 1, t*2)
+            else:
+                c = colors.linearlyInterpolatedColor(colors.Color(0, 0.9, 0.1, 1), colors.Color(0, 0, 1, 1), 0, 1, t*2-1)
+            gene_colors[gene] = c.hexval()
+        return gene_colors
+
+
+    @MultiprocessingBase.data_mapper_method
+    def _process_genome(self, gi, db):
+        genome = db[gi]
+        # sort features
+        tags = sorted((f for f in genome.features if 'blast_tag' in f.qualifiers), key=lambda a: a.location.end)
+        genes = GenesTagger(all_CDS(genome), rec_name_with_id(genome))
+        # search for clusters
+        candidate = GeneCluster(self.max_insertions)
+        candidates = [candidate]
+        for f in tags:
+            tag = f.qualifiers.get('blast_tag')
+            if not tag: tag = f.qualifiers.get('gene')
+            if not tag: continue
+            tag = tag[0]
+            if tag in self.full_cluster:
+                for tg in genes.taged_genes(f, self.min_coverage):
+                    if candidate.add(tg): continue
+                    candidate = GeneCluster(self.max_insertions)
+                    candidate.add(tg)
+                    candidates.append(candidate)
+        # check cluster candidates
+        confirmed = []
+        for c in candidates:
+            ctags = c.tags
+            if self.strict_order:
+                strand = c.location.strand
+                if strand == -1: ctags = ctags[::-1]
+                if not self.full_cluster.match_strict(ctags): continue
+            else:
+                missing = self.core_cluster.missing(ctags)
+                if missing: continue
+            confirmed.append(c)
+        # save if found anything
+        num_clusters = len(confirmed)
+        genome_name = rec_name_with_id(genome)
+        if confirmed:
+            for c in confirmed:
+                location = c.location
+                genes = c.genes
+                if location.strand == -1: genes = genes[::-1]
+                gene_names = []
+                last_gi = -1
+                for g in genes:
+                    gap = abs(g.gi-last_gi)
+                    if last_gi >= 0 and gap > 1:
+                        gene_names.extend(['NONE']*(gap-1))
+                    gene_names.append(g.tag.name)
+                    last_gi = g.gi
+                feature = SeqFeature(c.location, type='misc_feature')
+                feature.qualifiers['ugene_name'] = self.cluster_name
+                feature.qualifiers['ugene_group'] = 'putative_clusters'
+                feature.qualifiers['cluster_tag'] = self.cluster_name
+                feature.qualifiers['cluster_genes'] = ' '.join(gene_names)
+                feature.qualifiers['cluster_colors'] = ' '.join(self.gene_colors.get(g, '0x555555') for g in gene_names)
+                genome.features.append(feature)
+            fname = filename_for_record(genome, self.suffix)
+            if os.path.isfile(fname):
+                os.rename(fname, fname + '.back')
+            genome.seq.alphabet = generic_dna
+            safe_write(genome, fname)
+        return num_clusters, genome_name
+
+    def find_clusters(self, files):
+        # load genomes
+        genomes = SeqView.safe_load(files)
+        if not genomes: return False
+        glen = len(genomes)
+        results = {}
+        with ProgressCounter('Searching for %s clusters in %d sequence%s:' %
+                                     (self.cluster_name, glen, 's' if glen>1 else ''), glen) as prg:
+            work = self.Work()
+            work.start_work(self._process_genome, genomes.keys(), None, genomes)
+            work.assemble(ordered_results_assembler, results, prg)
+            if not work.wait(): return False
+        found = False
+        for gi in results:
+            res, gname = results[gi]
+            if not res: continue
+            found = True
+            print('Found %d %s cluster%s in: %s' % (res, self.cluster_name, 's' if res>1 else '', gname))
+        if not found:
+            print 'No putative clusters were found.'
+        return True
+
+
+class Main(MPMain):
+    description = 'Process genomes annotated by blast_annotate_genomes to find putative gene clusters.'
+
+    def _main(self):
+        self.argument('cluster', metavar='/path/to/cluster.file',
+                      type=str, help='A cluster definition file that contains two lines:\n'
+                                     'gene tags divided by spaces that constitute full cluster,\n'
+                                     'gene tags divided by spaces that constitute functional core.\n'
+                                     'If only one line is given, it is considered to be the core.\n'
+                                     'Gene tags divided by "|" operator are considered as alternatives.')
+
+        self.argument('files', metavar='/path/to/file', nargs='+',
+                      type=str, help='Paths to files with genomes.')
+
+        self.argument('-s', '--strict-order', action='store_true',
+                      help='With this flag only the clusters with gene order matching that of cluster definition are '
+                           'considered.')
+        self.argument('-i', '--max-insertions', default=0, metavar='int',
+                      type=int,
+                      help='Number of untagged CDS allowed between tagged ones.')
+        self.argument('-c', '--min-coverage', default=0.1, metavar='float',
+                      type=float,
+                      help='Minimum overlap of a tag and a gene to consider the gene tagged.')
+        self.parse_args()
+        #make everything in parallel
+        try: finder = ClusterFinder(self.abort_event,
+                                    self.args.cluster,
+                                    self.args.max_insertions,
+                                    self.args.min_coverage,
+                                    self.args.strict_order)
+        except ValueError as e:
+            print str(e)
+            return 1
+        finder.find_clusters(self.args.files)
+        return 0
+
+if __name__ == '__main__':
+    Main(run=True)

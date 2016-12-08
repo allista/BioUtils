@@ -1,0 +1,258 @@
+#!/usr/bin/python
+# coding=utf-8
+
+'''
+Created on Dec 11, 2015
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+import re
+from itertools import chain
+
+from BioUtils.Tools.tmpStorage import shelf_result
+
+from BioUtils.Tools.Output import ProgressCounter
+from BioUtils.SeqUtils import SeqView, Translator, copy_attrs, all_CDS
+from BioUtils.NCBI import BlastCLI
+
+from reportlab.lib import colors
+from Bio.Graphics import GenomeDiagram
+from Bio.Graphics.GenomeDiagram import CrossLink
+from Bio.SeqFeature import SeqFeature, FeatureLocation
+from Bio.Alphabet import NucleotideAlphabet, generic_dna
+
+from BioUtils.Tools.Multiprocessing import MultiprocessingBase, MPMain, ordered_shelved_results_assembler
+
+
+def grey(val): return colors.Color(val, val, val)
+
+
+class ClusterProject(MultiprocessingBase):
+    def __init__(self, project, abort_event):
+        super(ClusterProject, self).__init__(abort_event)
+        self.proj = project
+        self.diagram = None
+        self.clusters = []
+        self.fsets = []
+        self.crosslinks = []
+
+    _illegal = re.compile(r'[ \-=/()#]')
+    _fidq = 'fid'
+
+    @staticmethod
+    def _feature_name(f, quals=('gene', 'locus_tag'), default='unknown'):
+        for q in quals:
+            val = f.qualifiers.get(q)
+            if not val: continue
+            return ' '.join(val)
+        return default
+
+    @classmethod
+    def _cleanup_features(cls, rec):
+        for f in rec.features:
+            new_quals = dict()
+            for q in f.qualifiers:
+                qual = f.qualifiers[q]
+                new_q = cls._illegal.sub('_', q)
+                new_quals[new_q] = qual
+            f.qualifiers = new_quals
+
+    @MultiprocessingBase.data_mapper_method
+    @shelf_result
+    def _process_genome(self, gi, recs, tag):
+        record = recs[gi]
+        clusters = []
+        for f in record.features:
+            # cluster annotation
+            q = f.qualifiers.get('cluster_tag') #TODO: replace with class field from find_clusters.ClusterFinder
+            if not q: continue
+            if tag != ' '.join(q): continue
+            cluster = f.extract(record)
+            copy_attrs(record, cluster)
+            cluster.description += ' (%s)' % record.id
+            if clusters: cluster.description += ' cluster %d' % (len(clusters)+1)
+            if cluster.seq.alphabet is not NucleotideAlphabet:
+                cluster.seq.alphabet = generic_dna
+            self._cleanup_features(cluster)
+            # gene names
+            gene_names = f.qualifiers['cluster_genes'] #TODO: replace with class field from find_clusters.ClusterFinder
+            if not gene_names: gene_names = []
+            else: gene_names = [n.strip() for n in ' '.join(gene_names).split()]
+            # gene colors
+            gene_colors = f.qualifiers['cluster_colors']  # TODO: replace with class field from find_clusters.ClusterFinder
+            if not gene_colors: gene_names = []
+            else: gene_colors = [colors.HexColor(n.strip()) for n in ' '.join(gene_colors).split()]
+            clusters.append((cluster, gene_names, gene_colors))
+        return clusters
+
+
+    def extract_clusters(self, tag, files, order):
+        self.clusters = []
+        genomes = SeqView.safe_load(files)
+        if not genomes: return False
+        glen = len(genomes)
+        self.clusters = [None]*glen
+        with ProgressCounter('Extracting clusters from provided genomes:', glen) as prg:
+            work = self.Work()
+            work.start_work(self._process_genome, order or genomes.keys(), None, genomes, tag)
+            work.assemble(ordered_shelved_results_assembler, self.clusters, prg)
+            if not work.wait(): return False
+        self.clusters = list(chain.from_iterable(c for c in self.clusters if c))
+        return True
+
+    @MultiprocessingBase.data_mapper_method
+    def _blast_feature(self, f, c1, c2, evalue, min_rlen):
+        trans = Translator(self._abort_event)
+        cds = trans.translate(f.extract(c1), 11)
+        sixframes = trans.translate_six_frames_single(c2, 11)
+        if not sixframes: return [(None, None, None)]
+        results = []
+        for frame in sixframes:
+            res = BlastCLI.s2s_blast(cds, frame, evalue, command='blastp', task='blastp')
+            if res: results.extend(res)
+        hsps = BlastCLI.all_hsps(results, min_rlen)
+        if not hsps: return [(None, None, None)]
+        f1 = []
+        f2 = []
+        col = []
+        fname = self._feature_name(f, default='CDS')
+        cds_len = len(cds)
+        for hsp in hsps:
+            color_t = (float(hsp.identities) / hsp.align_length)
+            print '%s %s: %5.1f%% (%5.1f%%)' % (c1.description, fname, color_t * 100, float(hsp.identities) / cds_len * 100)
+            col.append(colors.linearlyInterpolatedColor(colors.Color(0, 0, 1, 0.2), colors.Color(0, 1, 0, 0.2),
+                                                        0.2, 1, color_t))
+            qstart = (hsp.query_start - 1) * 3
+            qend = qstart + hsp.align_length * 3
+            sstart = (hsp.sbjct_start - 1) * 3
+            send = sstart + hsp.align_length * 3
+            f1.append(
+                SeqFeature(FeatureLocation(f.location.start + qstart, f.location.start + qend, strand=hsp.strand[0])))
+            f2.append(SeqFeature(FeatureLocation(sstart, send, strand=hsp.strand[1])))
+        return zip(f1, f2, col)
+
+    @MultiprocessingBase.results_assembler_method
+    def _compose_crosslink(self, index, result, features1, features2, no_color):
+        for f1, f2, col in result:
+            if f1 is None: continue
+            if no_color: col = colors.color2bw(col)
+            tf1 = features1.add_feature(f1, color=col, border=col)
+            tf2 = features2.add_feature(f2, color=col, border=col)
+            self.diagram.cross_track_links.append(CrossLink(tf1, tf2, col, col))
+
+    def _compose_crosslinks(self, evalue, min_rlen, no_color):
+        if not self.diagram or not self.fsets: return
+        print 'Finding crosslinks between genes in the cluster.'
+        num_cids = len(self.clusters)
+        for ci1, (c1, _genes, _colors) in enumerate(self.clusters):
+            if ci1 >= num_cids - 1: break
+            features1 = self.fsets[ci1]
+            ci2 = ci1 + 1
+            features2 = self.fsets[ci2]
+            c2, _names2, _colors2 = self.clusters[ci2]
+            print '%s vs %s' % (c1.description, c2.description)
+            work = self.Work()
+            work.start_work(self._blast_feature,
+                            all_CDS(c1), None,
+                            c1, c2, evalue, min_rlen)
+            work.assemble(self._compose_crosslink, features1, features2, no_color)
+            work.wait()
+
+    def draw_clusters(self, add_crosslinks, evalue=0.0001, min_rlen=0.01, pagesize='A4', no_border=False, no_color=True):
+        print 'Creating cluster diagram.'
+        # create diagram
+        self.diagram = GenomeDiagram.Diagram(self.proj)
+        # add tracks
+        max_len = max(len(cluster) for cluster, _g, _c in self.clusters)
+        for cluster, _genes, _colors in self.clusters:
+            track = self.diagram.new_track(1,
+                                           name=cluster.description,
+                                           greytrack=1, height=0.4,
+                                           greytrack_fontcolor=colors.black,
+                                           greytrack_labels=1,
+                                           greytrack_fontsize=6,
+                                           scale=False,
+                                           start=0, end=max_len)
+            self.fsets.append(track.new_set())
+        # add crosslink features
+        if add_crosslinks:
+            self._compose_crosslinks(evalue, min_rlen, no_color)
+        # add CDS-es
+        for ci, (cluster, genes, gene_colors) in enumerate(self.clusters):
+            gene_id = 0
+            for f in all_CDS(cluster):
+                known = False
+                fname = 'NONE'
+                if gene_id < len(genes):
+                    fname = genes[gene_id]
+                    fcolor = gene_colors[gene_id]
+                if fname == 'NONE':
+                    fname = self._feature_name(f, default='')
+                    fcolor = colors.grey
+                else: known = True
+                if no_color: fcolor = colors.color2bw(fcolor)
+                self.fsets[ci].add_feature(f, sigil="BIGARROW",
+                                           color=fcolor,
+                                           border=fcolor if no_border else colors.black,
+                                           name=fname, label=True,
+                                           label_position="middle",
+                                           label_size=8 if known else 6,
+                                           label_color=colors.black if known else colors.grey,
+                                           label_angle=15)
+                gene_id += 1
+        self.diagram.draw(format="linear", pagesize=pagesize, fragments=1,
+                          start=0, end=max_len)
+        for ptype in ('PDF', 'EPS', 'SVG'):
+            dianame = '%s.%s' % (self.proj, ptype.lower())
+            print 'Saving: %s' % dianame
+            self.diagram.write(dianame, ptype)
+        print 'Done.'
+
+
+
+class Main(MPMain):
+    description = 'Draw cluster diagrams from genomes annotated by find_clusters.'
+
+    def _main(self):
+        self.argument('cluster', metavar='cluster_tag',
+                      type=str, help='The name of the cluster annotation added by find_clusters. '
+                                     'Also used to name the produced files.')
+
+        self.argument('files', metavar='/path/to/file', nargs='+',
+                      type=str, help='Paths to files with annotated genomes.')
+
+        self.argument('-o', '--order', default=None, metavar='str',
+                      type=str,
+                      help='A list of accession numbers separated by spaces to reorder the clusters on a diagram.')
+
+        self.argument('-C', '--crosslinks', action='store_true',
+                      help='Add cross-links between regions of the clusters that correspond to blastp alignments of '
+                           'genes from the upper (on the diagram) cluster to the lower cluster.')
+        self.argument('-e', '--evalue', default=0.0001, metavar='float',
+                      type=float,
+                      help='E-value to filter blastp results used to produce cross-links.')
+        self.argument('-l', '--min-relative-length', default=0.1, metavar='float',
+                      type=float,
+                      help='Minimum length of an alignment relative to the query length to filter blastp results '
+                           'used to produce cross-links.')
+
+        self.argument('-p', '--page-size', default='A4', metavar='str',
+                      type=str,
+                      help='Page size of the produced drawing. Default "A4".')
+        self.argument('--no-border', action='store_true',
+                      help='Disables black border around arrows representing genes.')
+        self.argument('--no-color', action='store_true',
+                      help='Do not use colors automatically assigned to genes by find_cluster, '
+                           'and if -C is given, to indicate identity percent of cross-links.')
+        self.parse_args()
+        project = ClusterProject(self.args.cluster, self.abort_event)
+        order = [o.strip() for o in self.args.order.split()] if self.args.order else None
+        if not project.extract_clusters(self.args.cluster, self.args.files, order):
+            return 1
+        project.draw_clusters(self.args.crosslinks, self.args.evalue, self.args.min_relative_length,
+                              self.args.page_size, self.args.no_border, self.args.no_color)
+        return 0
+
+
+if __name__ == '__main__':
+    Main(run=True)
