@@ -17,17 +17,19 @@ from itertools import chain
 from random import shuffle
 
 from Bio import SeqIO
+from Bio.SeqFeature import SeqFeature, FeatureLocation
 from Bio.SeqRecord import SeqRecord
 from Bio.Blast import NCBIXML
 from Bio.Blast import Applications as BPApps
 
+from BioUtils.Tools.Debug import estr
 from BioUtils.Tools.Multiprocessing import MultiprocessingBase
 from BioUtils.Tools.tmpStorage import shelf_result, roDict, from_shelf
 
 from BioUtils.Tools.Text import random_text
 from BioUtils.Tools.Misc import mktmp_name, safe_unlink, run_cline
 from BioUtils.Tools.Output import user_message, Progress, ProgressCounter
-from BioUtils.SeqUtils import mktmp_fasta, cat_records, Translator
+from BioUtils.SeqUtils import mktmp_fasta, cat_records, Translator, pretty_rec_name
 
 from .Applications import BlastDBcmdCommandline, FormatDBCommandline
 from .BlastBase import _BlastBase
@@ -74,27 +76,25 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
             cmd = cline(outfmt=5, out=bout, **kwargs)
             out, err = cmd()
             if err:
-                print ('\nError while performing local %s:\n%s\n%s\n%s' 
+                print ('\nError message from %s:\n%s\n%s\n%s'
                        % (command, cmd, out, err))
-                return None
             if parse_results:
                 with open(bout) as inp:
                     results = list(NCBIXML.parse(inp))
                 return results
         except Exception, e:
-            print '\nError while performing local %s:' % command
-            print e
+            print '\nError while performing local %s:\n%s' % (command, estr(e))
             return None
         finally:
             if not results_file: os.unlink(bout)
         return None
     
     @classmethod
-    def blast_seq(cls, query, db='nr', evalue=0.001, command='blastn', **kwargs):
+    def blast_seq(cls, query, db, evalue=0.001, command='blastn', **kwargs):
         '''Perform local blast of a SeqRecord against a database'''
         qfile = mktmp_fasta(query)
         results = cls.blast(command, query=qfile, db=db, 
-                                evalue=evalue, **kwargs)
+                            evalue=evalue, **kwargs)
         os.unlink(qfile)
         return results
     
@@ -113,6 +113,12 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
                      cwd=dbdir): 
             return os.path.join(dbdir, basename)
         else: shutil.rmtree(dbdir, ignore_errors=True)
+        return None
+
+    @classmethod
+    def delete_tmp_db(cls, dbpath):
+        dbdir = os.path.dirname(dbpath)
+        shutil.rmtree(dbdir, ignore_errors=True)
     
     @staticmethod
     def base_sid(s): return s.id.split(':')[0]
@@ -141,7 +147,7 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
             @MultiprocessingBase.data_mapper
             @shelf_result
             def worker(s):
-                r = self.blast_seq(s, db, evalue, command)
+                r = self.blast_seq(s, db, evalue, command, **kwargs)
                 if r and blast_filter: blast_filter(r)
                 if r: return self.fetch_results(r, db, what='alignment')
                 return None
@@ -234,19 +240,30 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
                         results[qi][si] = db['result']
                 prg.count()
         return results
-    
+
     @classmethod
-    def all_hsps(cls, blast_results, max_rlen=0):
-        if not blast_results: return None
-        hsps = []
-        for r in blast_results:
-            for alignment in r.alignments:
-                if max_rlen > 0:
-                    hsps += [hsp for hsp in alignment.hsps 
-                             if float(len(hsp.query))/r.query_length >= max_rlen]
-                else: hsps += alignment.hsps
-        return hsps or None
-    
+    def fetch_queries(cls, queries, db):
+        out_file = mktmp_name('.fasta')
+        entry_batch = mktmp_name('.qry')
+        qstr = '\n'.join(str(q) for q in queries)
+        with open(entry_batch, 'w') as out: out.write(qstr)
+        try:
+            cline = BlastDBcmdCommandline(db=db, out=out_file,
+                                          entry_batch=entry_batch)
+            out, err = cline()
+            if err:
+                print '\nError in blastdbcmd call:\n%s\n%s\n%s' % (cline, out, err)
+                return None
+            #parse results
+            records = list(SeqIO.parse(out_file, 'fasta'))
+            return records
+        except Exception, e:
+            print e
+            return None
+        finally:
+            safe_unlink(entry_batch)
+            safe_unlink(out_file)
+
     @classmethod
     def fetch_results(cls, results, db, what='record'):
         '''Fetch records that were found by BLAST search from the database
@@ -263,27 +280,8 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
                 queries.append(q)
         if not queries: return None
         #fetch records from database
-        out_file = mktmp_name('.fasta')
-        entry_batch = mktmp_name('.qry')
-        qstr = '\n'.join(str(q) for q in queries)
-        with open(entry_batch, 'w') as out: out.write(qstr)
-        try:
-            cline = BlastDBcmdCommandline(db=db, out=out_file, 
-                                          entry_batch=entry_batch)
-            out, err = cline()
-            if err:
-                print '\nError in blastdbcmd call:\n%s\n%s\n%s' % (cline, out, err)
-                return None
-            #parse results
-            records = list(SeqIO.parse(out_file, 'fasta'))
-            return records
-        except Exception, e:
-            print e
-            return None
-        finally:
-            safe_unlink(entry_batch)
-            safe_unlink(out_file)
-    
+        return cls.fetch_queries(queries, db)
+
     def _s2s_blast_batch(self, queries, subjects, subject_locs=None, evalue=0.001, command='blastn', **kwargs):
         queries_len = len(queries)
         subjects_len = len(subjects)
@@ -407,11 +405,11 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
                 print '\nAborted'
                 return None
             if not features or not features[0]:
-                print ('\nReference sequence does not contain annotated genes:\n%s %s' 
+                print ('\nReference sequence does not contain annotated _genes:\n%s %s'
                        % (reference.id, reference.description))
                 return None
             if len([f for f in features if f]) < 2:
-                print '\nSubject sequences do not contain annotated genes'
+                print '\nSubject sequences do not contain annotated _genes'
                 return None
             #add gene ids
             for ri, genes in enumerate(features):
@@ -432,7 +430,7 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
                         print '\nAborted'
                         return None
         #translate features to proteins
-        with Progress('Translating genes found in the reference and subjects...', num_records) as prg:
+        with Progress('Translating _genes found in the reference and subjects...', num_records) as prg:
             translator = Translator(self._abort_event)
             translations = [None]*num_records
             foi_translations = [[None]*num_records for _f in fois]
@@ -440,7 +438,7 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
                 if not f:
                     prg.step(i) 
                     continue
-                translation = translator.translate(rec, f, table)
+                translation = translator.translate_features(rec, f, table)
                 if not translation: return None 
                 if i > 0: 
                     translations[i] = cat_records(translation)
@@ -487,7 +485,7 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
                                 blast_results[gid] = foi_blast[gi]
         #process blast results
         pairs = list(itertools.product(xrange(len(translations[0])), xrange(len(stranslations))))
-        with ProgressCounter('Searching for genes in subjects that overlap with top blast hits...', len(pairs)) as prg:
+        with ProgressCounter('Searching for _genes in subjects that overlap with top blast hits...', len(pairs)) as prg:
             work = self.Work()
             work.start_work(self._find_features_by_hsps, pairs,
                             None, stranslations, blast_results)
@@ -506,9 +504,9 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
         product = lambda f: f.qualifiers.get('product', [''])[0]
         with open(filename, 'wb') as out:
             writer = csv.writer(out)
-            header = [reference.name+'_gene', 'locus_tag', reference.name+'_desc']
+            header = [reference.name+'gene', 'locus_tag', reference.name+'_desc']
             for g in subjects:
-                header += [g.name+'_gene', 'locus_tag', g.name+'_desc', g.name+'_coverage', g.name+'_percent', g.name+'_evalue']
+                header += [g.name+'gene', 'locus_tag', g.name+'_desc', g.name+'_coverage', g.name+'_percent', g.name+'_evalue']
             writer.writerow(header)
             for i, (feature, res) in enumerate(g2g_results):
                 if not res: continue
@@ -522,4 +520,171 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
                         row += [gid, locus_tag(g, f, gid), product(f), 
                                 '%d/%d' % (align_length, len(f)), percent_identity*100, evalue]
                 writer.writerow(row)
+
+    @staticmethod
+    def _get_homologues(query, min_identity, db, command):
+        homologues = set()
+        qlen = float(len(query))
+        results = BlastCLI.blast_seq(query, db, evalue=10, command=command)
+        if not results: return homologues
+        for r in results:
+            for ali in r.alignments:
+                identities = sum(hsp.identities for hsp in ali.hsps)
+                if identities / qlen > min_identity:
+                    rid = ali.hit_def.split()[0]
+                    if rid: homologues.add(rid)
+        try: homologues.remove(query.id)
+        except KeyError: pass
+        return homologues
+
+    @staticmethod
+    def _filter_homologues(get_all_homologues, seqs, min_identity, keep_ids=None, nucleotide=False):
+        print 'Filtering out close homologues. This will take a wile:'
+        command = 'blastn' if nucleotide else 'blastp'
+        dbname = ''
+        try:
+            with user_message('Formatting blast DB', '\n'):
+                dbname = BlastCLI.format_tmp_db(seqs, nucleotide)
+                if not dbname:
+                    print 'Unable to make temporary BLAST database.'
+                    return None
+            with ProgressCounter('Searching for homologues using local blastp...', len(seqs)) as prg:
+                homologues = get_all_homologues(seqs, min_identity, dbname, command, prg)
+        except Exception as e:
+            print '%s\n' % str(e)
+            return None
+        finally:
+            if dbname:
+                shutil.rmtree(os.path.dirname(dbname), ignore_errors=True)
+        if not homologues: return seqs
+        with user_message('Removing all homologs from each group except the first one...'):
+            remove = set()
+            if keep_ids: keep_ids = set(keep_ids)
+            for seq in seqs:
+                if seq.id in remove: continue
+                h = homologues.pop(seq.id, set())
+                if h:
+                    if keep_ids:
+                        nhoms = len(h)
+                        h -= keep_ids
+                        if nhoms != len(h) and seq.id not in keep_ids:
+                            h.add(seq.id)
+                    remove.update(h)
+            return [seq for seq in seqs if seq.id not in remove]
+
+    def filter_homologues(self, seqs, min_identity, keep_ids=None, nucleotide=False):
+        if not seqs: return False
+        @MultiprocessingBase.data_mapper
+        def _worker(qi, queries, db, command):
+            query = queries[qi]
+            homologues = BlastCLI._get_homologues(query, min_identity, db, command=command)
+            return query.id, homologues
+        @MultiprocessingBase.results_assembler
+        def _assembler(qi, result, homologues, prg):
+            homologues[result[0]] = result[1]
+            prg.count()
+        def get_all_homologues(seqs, min_identity, dbname, command, prg):
+            homologs = {}
+            work = self.Work()
+            work.start_work(_worker, range(len(seqs)), None, seqs, dbname, command)
+            work.assemble(_assembler, homologs, prg)
+            if not work.wait(): return {}
+            return homologs
+        return self._filter_homologues(get_all_homologues, seqs, min_identity, keep_ids, nucleotide)
+
+    def filter_homologues_single(self, seqs, min_identity, keep_ids=None, nucleotide=False):
+        if not seqs: return False
+        def get_all_homologues(seqs, min_identity, dbname, command, prg):
+            homologues = {}
+            for seq in seqs:
+                if self.aborted(): return {}
+                seq_homologues = set()
+                qlen = float(len(seq))
+                results = BlastCLI.blast_seq(seq, dbname, evalue=10, command=command)
+                if not results:
+                    prg.count()
+                    continue
+                for r in results:
+                    for ali in r.alignments:
+                        identities = sum(hsp.identities for hsp in ali.hsps)
+                        if identities / qlen > min_identity:
+                            rid = ali.hit_def.split()[0]
+                            if rid: seq_homologues.add(rid)
+                try: seq_homologues.remove(seq.id)
+                except KeyError: pass
+                homologues[seq.id] = seq_homologues
+                prg.count()
+            return homologues
+        return BlastCLI._filter_homologues(get_all_homologues, seqs, min_identity, keep_ids, nucleotide)
+
+    @staticmethod
+    def hsp2feature(name, group, location, hsp, letter_length=1):
+        feature = SeqFeature(location, type='misc_feature')
+        feature.qualifiers['ugene_group'] = group
+        feature.qualifiers['ugene_name'] = name
+        feature.qualifiers['blast_tag'] = name
+        feature.qualifiers['bitscore'] = hsp.bits
+        feature.qualifiers['evalue'] = hsp.expect
+        feature.qualifiers['gaps'] = hsp.gaps
+        feature.qualifiers['identities'] = hsp.identities
+        feature.qualifiers['align_length'] = hsp.align_length
+        feature.qualifiers['letter_length'] = letter_length
+        feature.qualifiers['percent'] = hsp.identities/float(hsp.align_length)*100
+        return feature
+
+    def blastn_annotate(self, tag_sequences, subject_record, evalue=0.001, **kwargs):
+        results = self.s2s_blast_batch(tag_sequences, [subject_record], evalue=evalue, command='blastn', **kwargs)
+        if results is None: return False
+        for i, tag in enumerate(tag_sequences):
+            if not results[i]: continue
+            record = results[i][0]
+            tag_name = pretty_rec_name(tag)
+            if tag_name != tag.id:
+                tag_name += ' (%s)' % tag.id
+            if not record: return False
+            for hit in record:
+                for ali in hit.alignments:
+                    for hsp in ali.hsps:
+                        location = FeatureLocation(hsp.sbjct_start-1,
+                                                   hsp.sbjct_end,
+                                                   hsp.strand[1])
+                        feature = self.hsp2feature(tag_name,'blastn_annotations', location, hsp)
+                        subject_record.features.append(feature)
+        return True
+
+    def blastp_annotate(self, tag_sequences, subject_record, evalue=0.001, table=11, **kwargs):
+        # translate subject in six frames
+        with user_message('Translating whole genome in 6 reading frames', '\n'):
+            translator = Translator(self._abort_event)
+            translation = translator.translate_six_frames(subject_record, table)
+        if not translation: return None
+        results = self.s2s_blast_batch(tag_sequences, translation, evalue=evalue, command='blastp', **kwargs)
+        if results is None: return False
+        with user_message('Adding results as annotations...'):
+            subj_len = len(subject_record)
+            for i, tag in enumerate(tag_sequences):
+                if not results[i]: continue
+                tag_name = pretty_rec_name(tag)
+                if tag_name != tag.id:
+                    tag_name += ' (%s)' % tag.id
+                for frame, record in enumerate(results[i]):
+                    if not record: continue
+                    frec = translation[frame]
+                    start = frec.annotations['start']
+                    strand = frec.annotations['strand']
+                    for hit in record:
+                        for ali in hit.alignments:
+                            for hsp in ali.hsps:
+                                if strand == 1:
+                                    location = FeatureLocation(start+(hsp.sbjct_start-1)*3,
+                                                               start+hsp.sbjct_end*3,
+                                                               strand)
+                                else:
+                                    location = FeatureLocation(subj_len-start-hsp.sbjct_end*3,
+                                                               subj_len-start-hsp.sbjct_start*3,
+                                                               strand)
+                                feature = self.hsp2feature(tag_name, 'blastp_annotations', location, hsp, 3)
+                                subject_record.features.append(feature)
+        return True
+
 #end class
