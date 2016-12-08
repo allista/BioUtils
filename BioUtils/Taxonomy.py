@@ -15,7 +15,7 @@ class Lineage(tuple):
     _prokaryotes = ('archaea', 'bacteria')
     known_taxons = set(_prokaryotes)
     unknown = 'unknown taxonomy'
-    taxonomy_re = re.compile(r'(\s|^)(((\w\s*)+\w;)+(\w\s*)+\w)\b')
+    taxonomy_re = re.compile(r'(\s|^)(\w+;((\w+\s+)*\w+;)*(\w+\s+)*\w+)(\s|$)')
     
     @classmethod
     def _register(cls, lineage):
@@ -123,7 +123,8 @@ class Organism(object):
         self.description = description
         self.lineage = (lineage if isinstance(lineage, Lineage) 
                         else Lineage(lineage))
-        
+        self.description = Lineage.taxonomy_re.sub('', self.description)
+
     def __str__(self):
         return '%s: %s [%s]' % (self.id, self.description, self.lineage)
           
