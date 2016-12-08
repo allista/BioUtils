@@ -62,7 +62,7 @@ class BatchEntrez(object):
     def get_records(self, query, database, **efetch_kwargs):
         self._start_time = time()
         Entrez.email = self.email
-        Entrez.tool = 'BatchEntrez.get_records'
+        Entrez.tool = 'BioUtils.BatchEntrez.get_records'
         return self._get_records(query, database, **efetch_kwargs)
     
     def get_records_for_terms(self, terms, database, **efetch_kwargs):
@@ -80,7 +80,7 @@ class BatchEntrez(object):
                   'in series of %d with %d sec pause in between.\n' 
                   % (num_queries, self.PAUSE_EACH, self.PAUSE))
             print('Total pause time will be:\n%s\n' % timedelta(seconds=pause_time))
-        query_time = num_queries * 1/3.0
+        query_time = num_queries * 4/3.0
         if query_time > 5:
             print('No more than 3 requests per second is allowed by NCBI,\n'
                   'so *minimum* time spend for your query will be:\n%s\n' % timedelta(seconds=query_time))
@@ -90,7 +90,7 @@ class BatchEntrez(object):
                   'may take several times as much.\n')
         #setup Entrez engine
         Entrez.email = self.email
-        Entrez.tool = 'BatchEntrez.get_records_for_terms'
+        Entrez.tool = 'BioUtils.BatchEntrez.get_records_for_terms'
         #perform queries in batches
         pause_num = self.PAUSE_EACH
         records = []
