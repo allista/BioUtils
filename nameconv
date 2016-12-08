@@ -1,11 +1,11 @@
 #!/usr/bin/python
 # coding=utf-8
 
-'''
+"""
 Created on Mar 28, 2016
 
 @author: Allis Tauri <allista@gmail.com>
-'''
+"""
 
 import os
 import sys
@@ -17,32 +17,33 @@ from BioUtils.PhyloUtils import PhyloUtils
 from BioUtils.Tools.Text import FilenameParser
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Convert an alignment to the ' 
+    parser = argparse.ArgumentParser(description='Convert an alignment to the '
         'strict phylip format, encoding names of the sequences and producing a CSV ' 
         'file with the ID-to-name mapping which could then be used to rename the '
         'leafs of a tree build from that alignment.')
     subparsers = parser.add_subparsers(title='actions', 
                                        description='Available operations. Type %s <action> -h to get instructions.' % parser.prog)
-    
-    eparser = subparsers.add_parser('encode', description='Encode names of sequences in alignment and save in a restrictive alignment format.')
+
+    eparser = subparsers.add_parser('encode', description='Encode names of sequences in alignment and save in a '
+                                                          'restrictive alignment format.')
     eparser.add_argument('alignments', metavar='filename',
                         type=str, nargs='+',
                         help='File(s) with alignments to convert.')
     eparser.add_argument('-f', '--from-format', metavar='FLAG', 
                         type=str,
                         help='Input alignments are in this format (clustal, fasta, etc.). ' 
-                        'If ommited, the format is guessed by extension.')
+                             'If ommited, the format is guessed by extension.')
     eparser.add_argument('-t', '--to-format', metavar='FLAG', 
                         type=str, default='phylip',
                         help='Convert alignment to format (default phylip).')
     eparser.add_argument('-g', '--global-ids', 
                         action='store_true',
                         help='If specified, use sequence identifiers that are unique '
-                        'across all provided alignments.')
+                             'across all provided alignments.')
     eparser.add_argument('-n', '--no-encode', 
                         action='store_false',
                         help='Do not encode sequence labels '
-                        '(for converting to non-restrictive formats like phylip-relaxed).')
+                             '(for converting to non-restrictive formats like phylip-relaxed).')
     
     dparser = subparsers.add_parser('decode', description='Replace node labels in a tree using a provided table.')
     dparser.add_argument('trees', metavar='filename',
@@ -51,7 +52,7 @@ if __name__ == '__main__':
     dparser.add_argument('-f', '--tree-format', metavar='FLAG', 
                         type=str,
                         help='Input trees are in this format (newick, nexml, etc.). ' 
-                        'If ommited, the format is guessed by extension.')
+                             'If ommited, the format is guessed by extension.')
     dparser.add_argument('-l', '--sequence-labels', 
                         type=str, metavar='file.csv', required=True,
                         help='A csv file with a table of sequence labels.')
