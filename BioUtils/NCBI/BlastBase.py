@@ -10,22 +10,47 @@ import re
 import inspect
 from collections import Counter, OrderedDict
 
-def num_alignments(results):
-    return sum(len(rec.alignments) for rec in results)
-
-def print_hsps(results):
-    for rec in results:
-        for ali in rec.alignments:
-            for hsp in ali.hsps:
-                print hsp
-                print
-
 
 class _BlastBase(object):
     '''Base class for both standalone and WWW versions'''
     
     _fetch_targets = ('record', 'alignment', 'hsp')
-    
+
+    @staticmethod
+    def num_alignments(results):
+        return sum(len(rec.alignments) for rec in results)
+
+    @staticmethod
+    def have_alignments(results):
+        return any(len(rec.alignments) > 0 for rec in results)
+
+    @classmethod
+    def print_hsps(cls, results):
+        for hsp in cls.iter_hsps(results):
+            print '%s\n' % str(hsp)
+
+    @staticmethod
+    def iter_alignments(results):
+        for rec in results:
+            for ali in rec.alignments: yield ali
+
+    @classmethod
+    def iter_hsps(cls, results):
+        for ali in cls.iter_alignments(results):
+            for hsp in ali.hsps: yield hsp
+
+    @classmethod
+    def all_hsps(cls, blast_results, min_rlen=0):
+        if not blast_results: return None
+        hsps = []
+        for r in blast_results:
+            for alignment in r.alignments:
+                if min_rlen > 0:
+                    hsps += [hsp for hsp in alignment.hsps
+                             if float(len(hsp.query)) / r.query_length >= min_rlen]
+                else: hsps += alignment.hsps
+        return hsps or None
+
     class Query(object):
         class Region(object):
             def __init__(self, start, end):
@@ -36,7 +61,6 @@ class _BlastBase(object):
                 
             def subrec(self, rec):
                 srec = rec[self.start:self.end]
-                print '='*80
                 return srec if self.strand else srec.reverse_complement()
             
             @property
@@ -50,27 +74,27 @@ class _BlastBase(object):
             def __str__(self):
                 return '%d-%d %s' % (self.start, self.end, self.blast_strand)
         
-        def __init__(self, alignment, what='record'):
+        def __init__(self, alignment, what='record', start_offset=0, end_offset=0):
             self.region = None
             self.subregions = []
             self.term, self.db = BlastID.extract(alignment.hit_id+' '+alignment.hit_def)
             if what == 'record': return
-            if len(alignment.hsps) == 1:
-                hsp = alignment.hsps[0] 
-                self.region = self.Region(hsp.sbjct_start, hsp.sbjct_end)
-                return
             loc = [0,0]
             for hsp in alignment.hsps:
-                self.subregions.append(self.Region(hsp.sbjct_start, hsp.sbjct_end))
-                loc[0] = (min(loc[0], hsp.sbjct_start, hsp.sbjct_end) if loc[0] > 0 
-                          else min(hsp.sbjct_start, hsp.sbjct_end))
-                loc[1] = max(loc[1], hsp.sbjct_start, hsp.sbjct_end)
+                if hsp.sbjct_start < hsp.sbjct_end:
+                    s = max(hsp.sbjct_start-start_offset, 1)
+                    e = hsp.sbjct_end+end_offset
+                else:
+                    s = hsp.sbjct_start + start_offset
+                    e = max(hsp.sbjct_end - end_offset, 1)
+                self.subregions.append(self.Region(s, e))
+                loc[0] = min(loc[0], s, e) if loc[0] > 0 else min(s, e)
+                loc[1] = max(loc[1], s, e)
             if what != 'hsp':
                 strand = Counter(r.strand for r in self.subregions)
-                if strand.most_common(1)[0]: self.region = self.Region(*loc)
-                else: self.region = self.Region(loc[1], loc[0])
+                if not strand.most_common(1)[0]: loc = [loc[1], loc[0]]
                 self.subregions = None
-            else: self.region = self.Region(*loc)
+            self.region = self.Region(*loc)
             
         def __nonzero__(self): return bool(self.term)
         
@@ -78,7 +102,7 @@ class _BlastBase(object):
             if not self.subregions: return records
             subrecords = []
             for rec in records:
-                subrecords.extend(r.subrec(rec) for r in self.subregions)
+                subrecords.extend([r.subrec(rec) for r in self.subregions])
             return subrecords
         
         def __str__(self):
@@ -132,21 +156,29 @@ class BlastID(object):
 
 
 class BlastFilter(object):
-    def __init__(self, predicate):
+    def __init__(self, predicate, filter_hsps = False):
+        self.filter_hsps = filter_hsps
         self.P   = predicate
         self.AND = None
         self.OR  = None
     
-    def test(self, alignment):
-        return (self.P(alignment) 
-                and (self.AND.test(alignment) if self.AND else True)
-                or  (self.OR.test(alignment) if self.OR else False))
+    def test(self, obj):
+        return (self.P(obj)
+                and (self.AND.test(obj) if self.AND else True)
+                or (self.OR.test(obj) if self.OR else False))
     
     def __call__(self, results):
         for record in results:
             for i in xrange(len(record.alignments)-1,-1,-1):
-                if not self.test(record.alignments[i]):
+                if self.filter_hsps:
+                    for j in xrange(len(record.alignments[i].hsps) - 1, -1, -1):
+                        if not self.test(record.alignments[i].hsps[j]):
+                            del record.alignments[i].hsps[j]
+                    if not record.alignments[i].hsps:
+                        del record.alignments[i]
+                elif not self.test(record.alignments[i]):
                     del record.alignments[i]
+        return results
                     
     def __str__(self):
         try: s = inspect.getsource(self.P).strip()
@@ -157,3 +189,24 @@ class BlastFilter(object):
         if self.OR: 
             s += '\nOR %s' % self.OR
         return s
+
+    def AndFilter(self, predicate, filter_hsps = False):
+        if self.AND is None:
+            self.AND = BlastFilter(predicate, filter_hsps)
+        else: self.AND.AndFilter(predicate, filter_hsps)
+
+    def OrFilter(self, predicate, filter_hsps = False):
+        if self.OR is None:
+            self.OR = BlastFilter(predicate, filter_hsps)
+        else: self.OR.AndFilter(predicate, filter_hsps)
+
+
+class UniqueIDs(BlastFilter):
+    def __init__(self, ids=[]):
+        self._ids = set(ids)
+        BlastFilter.__init__(self, self._check_id, False)
+
+    def _check_id(self, ali):
+        if ali.hit_id in self._ids: return False
+        self._ids.add(ali.hit_id)
+        return True
