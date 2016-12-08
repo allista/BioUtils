@@ -8,16 +8,18 @@ Created on Dec 24, 2015
 
 import os, sys, re
 import tempfile, itertools
+from BioUtils.Tools.Output import user_message
 from copy import deepcopy
 
 from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from Bio.Alphabet import generic_alphabet, generic_dna
+from Bio.Alphabet import generic_alphabet, generic_dna, generic_protein
+from Bio.Data.IUPACData import ambiguous_dna_letters, ambiguous_rna_letters, extended_protein_letters
 
-from .Tools.Multiprocessing import MultiprocessingBase
-from .Tools.tmpStorage import shelf_result, roDict, register_tmp_file, cleanup_file
+from .Tools.Multiprocessing import MultiprocessingBase, ordered_shelved_results_assembler
+from .Tools.tmpStorage import shelf_result, register_tmp_file, cleanup_file
 from .Tools.Text import FilenameParser, random_text
 from .Tools.Misc import mktmp_name, safe_unlink
 
@@ -34,19 +36,42 @@ class SeqLoader(MultiprocessingBase, FilenameParser):
     
     def __init__(self, abort_event):
         super(SeqLoader, self).__init__(abort_event)
-        
+
+    dna_letters = set(ambiguous_dna_letters.upper())
+    rna_letters = set(ambiguous_rna_letters.upper())
+    protein_letters = set(extended_protein_letters.upper())
+
     @classmethod
-    def load_file(cls, filename, schema=None):
+    def guess_alphabet(cls, seq):
+        letters = set(seq[:10].upper()) # use just first 10 letters
+        nletters = len(letters)
+        if len(letters.intersection(cls.protein_letters)) == nletters:
+            return generic_protein
+        if len(letters.intersection(cls.dna_letters)) == nletters:
+            return generic_dna
+        return generic_alphabet
+
+    @classmethod
+    def _set_alphabet(cls, rec, abc):
+        rec.seq.alphabet = abc
+        return rec
+
+    @classmethod
+    def load_file(cls, filename, schema=None, guess_alphabet=False):
         if not os.path.isfile(filename):
             print 'No such file: %s' % filename 
             return None
         if not schema: schema = cls.guess_schema(filename) 
-        try: return list(SeqIO.parse(filename, schema))
+        try:
+            recs = list(SeqIO.parse(filename, schema))
+            if guess_alphabet:
+                recs = [cls._set_alphabet(rec, cls.guess_alphabet(rec)) for rec in recs]
+            return recs
         except Exception, e:
             print 'Unable to parse %s as %s\n%s' % (filename, schema, str(e))
             return None
         
-    def load_dir(self, dirname, schema=None, namefilter=None, flatten=True):
+    def load_dir(self, dirname, schema=None, namefilter=None, flatten=True, guess_alphabet=False):
         if isinstance(namefilter, str):
             namefilter = re.compile(namefilter)
         if isinstance(namefilter, re_type):
@@ -60,10 +85,10 @@ class SeqLoader(MultiprocessingBase, FilenameParser):
         if not files:
             print 'No files found.'
             return None
-        return self.load_files(files, schema, flatten)
+        return self.load_files(files, schema, flatten, guess_alphabet)
     
-    def load_files(self, files, schema=None, flatten=True):
-        results = self.parallelize_work(1, self.load_file, files, schema)
+    def load_files(self, files, schema=None, flatten=True, guess_alphabet=False):
+        results = self.parallelize_work(1, self.load_file, files, schema, guess_alphabet)
         if not results: return None
         results = filter(lambda x: bool(x), results)
         if flatten: return list(itertools.chain.from_iterable(results))
@@ -89,13 +114,33 @@ class SeqView(object):
                           'master:  %s' % self.master,
                           'upper:   %s' % self.upper,
                           'records: %d' % len(self._ids)))
-                
+
+    def load_dir(self, dirname, dbname=None, namefilter=None):
+        if isinstance(namefilter, str):
+            namefilter = re.compile(namefilter)
+        if isinstance(namefilter, re_type):
+            flt = namefilter.match
+        elif hasattr(namefilter, '__call__'):
+            flt = namefilter
+        else: flt = lambda n: True
+        files = [f for f in (os.path.join(dirname, fn)
+                             for fn in os.listdir(dirname) if flt(fn))
+                 if os.path.isfile(f)]
+        if not files:
+            print 'No files found in: %s' % dirname
+            return False
+        self.load(files, dbname)
+
     def load(self, files, dbname=None):
         if isinstance(files, basestring): files = [files]
         self.close()
         valid = []
         schemas = set()
         for filename in files:
+            if isinstance(filename, bytes):
+                filename = filename.decode('utf8')
+            elif isinstance(filename, str):
+                filename = unicode(filename)
             if not os.path.isfile(filename):
                 print 'No such file: %s' % filename 
                 continue
@@ -106,7 +151,7 @@ class SeqView(object):
             schemas.add(schema)
             valid.append(filename)
         if len(schemas) != 1:
-            raise ValueError('All files should be of the same type, but %d types found: %s' % (len(schemas), schemas))
+            raise ValueError('All files should be of the same type, but %d types found: %s' % (len(schemas), ', '.join(schemas)))
         if not valid:
             print 'No valid files provided.'
             return False
@@ -119,6 +164,21 @@ class SeqView(object):
         self._ids = tuple(sorted(self.db.keys()))
         self.master = True
         return bool(self)
+
+    @classmethod
+    def safe_load(cls, files):
+        with user_message("Loading sequences..."):
+            try:
+                view = cls()
+                view.load(files)
+            except Exception as e:
+                print str(e)
+                return None
+        if len(view) == 0:
+            print 'No sequences were loaded from:\n%s' % files
+            view.close()
+            return None
+        return view
 
     def reload(self, dbname):
         self.close()
@@ -212,7 +272,7 @@ class Translator(MultiprocessingBase):
     @staticmethod
     @MultiprocessingBase.data_mapper
     @shelf_result
-    def _translate_genes(fi, rec, table):
+    def _translate_feature(fi, rec, table):
         f = rec.features[fi]
         srec = f.extract(rec)
         try: 
@@ -231,39 +291,102 @@ class Translator(MultiprocessingBase):
         except Exception, e:
             print e
             raise RuntimeError('Unable to translate: %s' % str(srec.seq))
-        return trec 
-    
+        return trec
+
     @staticmethod
-    @MultiprocessingBase.results_assembler
-    def _translation_assembler(index, tname, translations):
-        if tname and os.path.isfile(tname):
-            with roDict(tname) as db:
-                translations[index] = db['result']
-            cleanup_file(tname)
-            
-    def translate(self, rec, features=None, table='Standard', join=False, gap='X'*20):
+    def _translate_sixframe_seq(i, recs, table):
+        rec = recs[i]
+        try:
+            tseq = rec.seq.translate(table)
+            if tseq[-1] == '*': tseq = tseq[:-1]
+            trec = SeqRecord(tseq,
+                             id='FRAME%d'%i, name=rec.name,
+                             description=rec.description,
+                             annotations=rec.annotations)
+        except Exception, e:
+            print e
+            raise RuntimeError('Unable to translate frame %d of: %s %s' % (i, rec.id, rec.description))
+        return trec
+
+    @staticmethod
+    @MultiprocessingBase.data_mapper
+    @shelf_result
+    def _translate_sixframe_seq_mapper(i, recs, table):
+        return Translator._translate_sixframe_seq(i, recs, table)
+
+    @staticmethod
+    def translate(record, table):
+        rem = len(record) % 3
+        if rem > 0: record = record[:-rem]
+        tseq = record.seq.translate(table)
+        if tseq[-1] == '*': tseq = tseq[:-1]
+        trec = SeqRecord(tseq,
+                         id=record.id, name=record.name,
+                         description=record.description,
+                         annotations=record.annotations)
+        return trec
+
+    def translate_features(self, rec, features=None, table='Standard', join=False, gap='X' * 20):
         if features is None: features = rec.features
         translation = [None]*len(features)
         work = self.Work()
-        work.start_work(self._translate_genes, features, None, rec, table)
-        work.assemble(self._translation_assembler, translation)
+        work.start_work(self._translate_feature, features, None, rec, table)
+        work.assemble(ordered_shelved_results_assembler, translation)
         if not work.wait(): return None
         if join: return cat_records(translation, gap=gap)
         return translation
+
+    def _get_frame(self, rec, frame, revcomp=False):
+        frec = rec[frame:]
+        rem = len(frec) % 3
+        if rem > 0: frec = frec[:-rem]
+        frec.annotations = dict(rec.annotations)
+        frec.dbxrefs = list(rec.dbxrefs)
+        frec.annotations['start'] = frame
+        frec.annotations['strand'] = -1 if revcomp else 1
+        return frec
+
+    def _get_six_frames(self, rec):
+        if len(rec) < 6:
+            raise ValueError('Sequence %s is too short for 6-frame translation. '
+                             'Should be at least 6 letters long.' % rec.id)
+        #prepare six frames
+        revcomp = rec.reverse_complement()
+        recs = [self._get_frame(rec, 0),
+                self._get_frame(rec, 1),
+                self._get_frame(rec, 2),
+                self._get_frame(revcomp, 0, True),
+                self._get_frame(revcomp, 1, True),
+                self._get_frame(revcomp, 2, True)]
+        return recs
+
+    def translate_six_frames(self, rec, table='Standard'):
+        recs = self._get_six_frames(rec)
+        translation = [None] * 6
+        work = self.Work()
+        work.start_work(self._translate_sixframe_seq_mapper, range(0, 6), None, recs, table)
+        work.assemble(ordered_shelved_results_assembler, translation)
+        if not work.wait(): return None
+        return translation
+
+    def translate_six_frames_single(self, rec, table='Standard'):
+        '''Single-process variant of translate_six_frames'''
+        recs = self._get_six_frames(rec)
+        return [self._translate_sixframe_seq(i, recs, table) for i in range(6)]
+
     
-    
-def load_dir(abort_event, dirname, schema=None, namefilter=None, flatten=True):
+def load_dir(abort_event, dirname, schema=None, namefilter=None, flatten=True, guess_alphabet=False):
     loader = SeqLoader(abort_event)
-    return loader.load_dir(dirname, schema, namefilter, flatten)
+    return loader.load_dir(dirname, schema, namefilter, flatten, guess_alphabet)
 
 
-def load_files(abort_event, filenames, schema=None, flatten=True):
+def load_files(abort_event, filenames, schema=None, flatten=True, guess_alphabet=False):
     loader = SeqLoader(abort_event)
-    return loader.load_files(filenames, schema, flatten)
+    return loader.load_files(filenames, schema, flatten, guess_alphabet)
 
 
 def mktmp_fasta(rec, register=True):
-    fd, fn = tempfile.mkstemp('.fas', 'wb')
+    fd, fn = tempfile.mkstemp('.fas', 'fa')
     f = os.fdopen(fd, 'wb')
     SeqIO.write(rec, f, 'fasta')
     if register: register_tmp_file(fn)
@@ -288,18 +411,22 @@ def cat_records(records, gap='X'*20):
     return cat
 #end def
 
-def unique_records(records):
+
+def unique_records(*records):
     ids = set()
-    for r in records:
-        if r.id in ids: continue
-        ids.add(r.id)
-        yield  r
-        
+    for recs in records:
+        for r in recs:
+            if r.id in ids: continue
+            ids.add(r.id)
+            yield  r
+
+
 def safe_parse(filename, schema=None, alphabet=None):
     try: return SeqIO.parse(filename, SeqLoader.schema(filename, schema), alphabet)
     except Exception, e:
         print 'Unable to parse %s\n%s\n' % (filename, str(e))
         return []
+
 
 def safe_write(records, filename, schema=None):
     try: SeqIO.write(records, filename, SeqLoader.schema(filename, schema))
@@ -308,10 +435,20 @@ def safe_write(records, filename, schema=None):
         return False
     return True
 
+def features_of_type(record, ftype):
+    return [f for f in record.features if f.type == ftype]
+
+def all_CDS(record):
+    return [f for f in record.features if f.type == 'CDS']
+
+def all_genes(record):
+    return [f for f in record.features if f.type == 'gene']
+
 def features_of_type_indexes(record, ftype):
     return [i for i, f in enumerate(record.features) if f.type == ftype]
 
-def get_indexes_of_genes(rec):
+
+def get_indexes_of_all_genes(rec):
     features = features_of_type_indexes(rec, 'CDS')
     if not features:
         features = features_of_type_indexes(rec, 'gene')
@@ -320,18 +457,39 @@ def get_indexes_of_genes(rec):
             return None
     return features
 
+
+def get_feature_indexes_by_qualifier(rec, qualifier, values):
+    if not isinstance(values, (list, tuple)):
+        values = [values]
+    indexes = dict.fromkeys(values)
+    for i, f in enumerate(rec.features):
+        try: tag = f.qualifiers[qualifier][0]
+        except: continue
+        try: index = indexes[tag]
+        except: continue
+        if index is not None: continue
+        indexes[tag] = i
+    return [i for i in (indexes.get(tag) for tag in values) if i is not None]
+
+
+def get_indexes_of_genes(rec, genes):
+    return get_feature_indexes_by_qualifier(rec, 'locus_tag', genes)
+
+
 def simple_rec(seq, sid, name='', description='', feature='', alphabet=generic_alphabet):
     rec = SeqRecord(Seq(seq, alphabet), id=sid, name=name, description=description)
     if feature: rec.features.append(simple_feature(0, len(rec), feature, feature))
     return rec
 
-def simple_feature(start, end, fid='<unknown id>', ftype='misc_feature'):
+
+def simple_feature(start, end, fid='<unknown id>', ftype='misc_feature', qualifiers=None):
     '''Make a SeqFeature starting at start and ending at end.
     Indexes are zero-based, end is not included and if start > end
     the feature is constructed on the reverse-complement strand.'''
     if start > end: loc = FeatureLocation(end, start, -1)
     else: loc = FeatureLocation(start, end, 1)
-    return SeqFeature(loc, type=ftype, id=fid)
+    return SeqFeature(loc, type=ftype, id=fid, qualifiers=qualifiers)
+
 
 def pretty_rec_name(rec):
 #    print 'source: %s, id %s, desc %s' % (rec.annotations.get('source'), rec.id, rec.description)#test
@@ -340,14 +498,20 @@ def pretty_rec_name(rec):
             or rec.description.replace(rec.id, '').strip() 
             or rec.id)
 
+def rec_name_with_id(rec):
+    return '%s (%s)' % (pretty_rec_name(rec), rec.id)
+
+def filename_for_record(rec, ext='gb'):
+    return '%s_%s.%s' % (pretty_rec_name(rec).replace(' ', '_').strip('.'), rec.id, ext)
+
 def copy_attrs(frec, trec):
     trec.id = frec.id
     trec.name = frec.name
     trec.description = frec.description
     return trec
 
+
 def random_DNA(length): return random_text(length, 'ATGC')
 def random_DNA_rec(length, sid, name='', description='', feature=''):
     return simple_rec(random_DNA(length), sid, name, description, feature, alphabet=generic_dna)
-    
     
