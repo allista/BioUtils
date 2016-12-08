@@ -99,6 +99,9 @@ class AlignmentExt(MultipleSeqAlignment):
     def from_msa(cls, msa):
         return cls(msa, msa._alphabet, msa.annotations)
 
+    def clone(self):
+        return AlignmentExt(self, self._alphabet, self.annotations)
+
 class AlignmentUtils(FilenameParser):
     schemas   = {'fasta':   SeqLoader.fasta_re,
                  'clustal': re.compile(r'.*\.aln$'),
@@ -133,7 +136,11 @@ class AlignmentUtils(FilenameParser):
     @classmethod
     def mktmp(cls, alignments, schema='fasta'):
         outfile = mktmp_name('.%s' % schema)
-        cls.save(alignments, outfile, schema)
+        if cls.save(alignments, outfile, schema):
+            return outfile
+        else:
+            safe_unlink(outfile)
+            return None
     
     @classmethod
     def align(cls, seq_records, outfile=None):
@@ -147,8 +154,8 @@ class AlignmentUtils(FilenameParser):
             remove_out = True
         else: remove_out = False
         msafile = mktmp_fasta(seq_records)
-        args = dict(thread=cpu_count, input=msafile)
-        if len(seq_records) < 10000: 
+        args = dict(thread=-1, input=msafile)
+        if len(seq_records) < 10000:
             args['auto'] = True
         else: 
             args['parttree'] = True
