@@ -32,7 +32,8 @@ class Lineage(tuple):
         self.str = self._delim.join(self)
         self._register(self)
     
-    def __str__(self): return self.str
+    def __str__(self):
+        return ';'.join(l.capitalize() for l in self)
     
     def __eq__(self, other):
         return self.str == other.str
@@ -42,7 +43,8 @@ class Lineage(tuple):
                        delimiter=self._delim)
     
     def __getitem__(self, index):
-        taxons = tuple.__getitem__(self, index)
+        try: taxons = tuple.__getitem__(self, index)
+        except IndexError: taxons = ''
         if isinstance(taxons, basestring): return taxons
         return self.from_iter(taxons)
     #needs to be overriden because subclassing a builtin tuple
@@ -52,12 +54,10 @@ class Lineage(tuple):
         return delimiter.join(t.capitalize() for t in self)
     
     @property
-    def first(self):
-        return self[0] if self else ''
+    def first(self): return self[0]
     
     @property
-    def last(self):
-        return self[-1] if self else ''
+    def last(self): return self[-1]
     
     def includes(self, other):
         return other.str.startswith(self.str)
@@ -102,17 +102,14 @@ class Lineage(tuple):
     def sameall(cls, lineages):
         if not lineages: return False
         l0 = lineages[0]
-        for l in lineages[1:]:
-            if l0 != l: return False
-        return True
-    
+        return all(l1 == l0 for l1 in lineages[1:])
+
     @classmethod
-    def samelast(cls, lineages):
-        if not lineages: return False
-        l0 = lineages[0].last
-        for l in lineages[1:]:
-            if l0 != l.last: return False
-        return True
+    def samelast(cls, lineages, last=1):
+        if not lineages or not last: return False
+        ind = -last
+        l0 = lineages[0][ind]
+        return l0 and all(l1[ind] == l0 for l1 in lineages[1:])
 #end class
 
 
