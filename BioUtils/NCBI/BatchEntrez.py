@@ -5,7 +5,7 @@ Created on Mar 17, 2016
 
 @author: Allis Tauri <allista@gmail.com>
 '''
-
+from BioUtils.Tools import AbortableBase
 from time import time, sleep
 from datetime import timedelta
 
@@ -14,14 +14,15 @@ from Bio import Entrez
 
 from BioUtils.Tools.Misc import retry
 
-class BatchEntrez(object):
+class BatchEntrez(AbortableBase):
     #defaults
     RETRIES    = 3
     PAUSE_EACH = 100
     BATCH      = 20
     PAUSE      = 60
     
-    def __init__(self, email):
+    def __init__(self, abort_event, email):
+        AbortableBase.__init__(self, abort_event)
         self.email       = email
         self._start_time = -1
     #end def
@@ -32,6 +33,7 @@ class BatchEntrez(object):
         if not results['IdList']:
             print('NCBI returned no result for query: %s' % query) 
             return []
+        if self.aborted(): return []
         webenv    = results['WebEnv']
         query_key = results['QueryKey']
         #fetch genbank data for the received IDs 
@@ -95,6 +97,7 @@ class BatchEntrez(object):
         pause_num = self.PAUSE_EACH
         records = []
         for i in xrange(0, num_terms, self.BATCH):
+            if self.aborted(): return None
             if i/self.BATCH > pause_num:
                 print('Pausing for %d seconds...\n' % self.PAUSE)
                 sleep(self.PAUSE)
