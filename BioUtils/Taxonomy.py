@@ -25,7 +25,7 @@ class Lineage(tuple):
     def __new__(cls, line, delimiter=';'):
         line = line.strip(' \n\r')
         taxons = [t1 for t1 in (t.strip().lower() for t in line.split(delimiter)) if t1]
-        if taxons and taxons[0] in cls._prokaryotes:  taxons.insert(0, 'prokaryotes')
+        if taxons and taxons[0] in cls._prokaryotes: taxons.insert(0, 'prokaryotes')
         return tuple.__new__(cls, taxons)
     
     def __init__(self, line, delimiter=';'):
@@ -34,6 +34,8 @@ class Lineage(tuple):
     
     def __str__(self):
         return ';'.join(l.capitalize() for l in self)
+
+    def __repr__(self): return str(self)
     
     def __eq__(self, other):
         return self.str == other.str
@@ -103,6 +105,12 @@ class Lineage(tuple):
         if not lineages: return False
         l0 = lineages[0]
         return all(l1 == l0 for l1 in lineages[1:])
+
+    @classmethod
+    def samefirst(cls, lineages, first=1):
+        if not lineages or not first: return False
+        l0 = lineages[0][:first]
+        return l0 and all(l1[:first] == l0 for l1 in lineages[1:])
 
     @classmethod
     def samelast(cls, lineages, last=1):
