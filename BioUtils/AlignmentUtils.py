@@ -4,7 +4,7 @@ Created on Jul 20, 2012
 
 @author: Allis Tauri <allista@gmail.com>
 '''
-
+import os
 import re
 
 from Bio import AlignIO
@@ -13,11 +13,9 @@ from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.Align.Applications import MafftCommandline
 from Bio.Align import MultipleSeqAlignment
-from Bio.Phylo.Applications import FastTreeCommandline
 
-from BioUtils.SeqUtils import mktmp_fasta, SeqLoader, copy_attrs, num_fasta_records
+from BioUtils.SeqUtils import mktmp_fasta, SeqLoader, copy_attrs
 from BioUtils.Tools.Text import FilenameParser, issingleletter
-from BioUtils.Tools.Multiprocessing import cpu_count
 from BioUtils.Tools.Misc import safe_unlink, run_cline, mktmp_name
 
 class AlignmentExt(MultipleSeqAlignment):
@@ -162,9 +160,11 @@ class AlignmentUtils(FilenameParser):
             args['partsize'] = 1000
         ali = None
         if run_cline(MafftCommandline(**args), stdout=outfile):
-            if remove_out:
-                ali = AlignmentExt.from_msa(AlignIO.read(outfile, 'fasta'))
-            else: ali = True
+            if os.path.isfile(outfile) and os.path.getsize(outfile) > 0:
+                if remove_out:
+                    ali = AlignmentExt.from_msa(AlignIO.read(outfile, 'fasta'))
+                else: ali = True
+            else: ali = False
         if remove_out: safe_unlink(outfile)
         safe_unlink(msafile)
         return ali
