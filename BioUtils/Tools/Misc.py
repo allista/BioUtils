@@ -12,6 +12,7 @@ from datetime import datetime
 from .tmpStorage import register_tmp_file
     
 def retry(func, error_msg, num_retries):
+    result = None
     for i in xrange(num_retries):
         try:
             result = func()
