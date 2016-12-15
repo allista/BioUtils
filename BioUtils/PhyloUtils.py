@@ -9,6 +9,7 @@ import os
 import dendropy as dp
 from xml.dom import minidom
 
+import math
 from Bio.Align import MultipleSeqAlignment
 from Bio.Phylo.Applications import FastTreeCommandline
 
@@ -25,16 +26,19 @@ from .Taxonomy import Lineage
 class PhyloUtils(MultiprocessingBase, FilenameParser):
     schemas   = {'newick': re.compile(r'.*\.(tre|nwk|txt)$'),
     }
-    
+
+    reroot_midpoint = 'midpoint'
+    reroot_unroot = 'unroot'
+    reroot_specials = (reroot_midpoint, reroot_unroot)
+
     _organism_re = re.compile(r'\s\[.*?\]\.?$')
     
     @classmethod
-    def build_fast_tree(cls, alignment, outfile):
+    def build_fast_tree(cls, alignment, outfile, **kwargs):
         # type: (MultipleSeqAlignment, str) -> bool
         """Build an approximate-ML tree with fasttree.
         :param outfile: output filename
         :param alignment: alignment object or a filename of an alignment in fasta format"""
-        print 'Building an approximate-ML tree with fasttree.'
         if isinstance(alignment, MultipleSeqAlignment):
             alnfile = mktmp_name('.aln.fasta')
             AlignmentUtils.save(alignment, alnfile)
@@ -45,6 +49,7 @@ class PhyloUtils(MultiprocessingBase, FilenameParser):
         if num_fasta_records(alnfile) >= 10000:
             args['fastest'] = True
             args['boot'] = 100
+        args.update(kwargs)
         if not run_cline(FastTreeCommandline(**args), name=cls.strip_ext(outfile)):
             return False 
         print 'Done\n'
@@ -55,57 +60,64 @@ class PhyloUtils(MultiprocessingBase, FilenameParser):
         if annotatable.annotations:
             for a in annotatable.annotations:
                 if a.name == 'format':
-                    if a.value and not replace: a.value += value
-                    else: a.value = value
-                    return 
-        annotatable.annotations.add_new('format', value, datatype_hint=datatype)
+                    if a.value and not replace:
+                        a.value = ' %s %s;' % (a.value.strip(' ;'), value)
+                    else:
+                        a.value = ' %s;' % value
+                    return
+        annotatable.annotations.add_new('format', ' %s;' % value, datatype_hint=datatype)
         
     @classmethod
     def _collapse_node(cls, node, name, collapse_hard):
-        print 'Collapsing %s' % str(name)
         leafs = node.leaf_nodes()
         if any(hasattr(l, 'dont_collapse') for l in leafs):
             return
+        num_leafs = len(leafs)
+        print 'Collapsing %d %s' % (num_leafs, str(name))
         if collapse_hard:
-            num_leafs = len(leafs)
+            node_size = int(math.ceil(2*math.sqrt(num_leafs*25/3)))
+            node_hw = (node_size, node_size)
             for child in node.child_nodes():
                 node.remove_child(child)
-            node.label = '%s (%d leafs collapsed)' % (name.capitalize(), num_leafs)
+            node.label = '%s (%d collapsed)' % (name.capitalize(), num_leafs)
+            cls._add_format(node, 'nh=%d nw=%d sh=2' % node_hw)
         else:
             for cn in node.preorder_internal_node_iter():
                 cn.annotations.add_new('collapse', '', datatype_hint='xsd:string')
 
     @classmethod
-    def _set_node_taxonomy(cls, node, top_lineage, parent_lineage, 
-                           collapse_taxa, collapse_last, 
-                           collapse_min_nodes, collapse_hard, 
+    def _set_node_taxonomy(cls, node, top_lineage, parent_lineage,
+                           collapse_taxa, collapse_at_level,
+                           collapse_min_nodes, collapse_hard,
+                           hide_support, hide_taxonomy,
                            lineage_colors):
-        '''
-        Sets edge labels to clade names.
-        Optionally, "collapse" (in Dendroscope's sense) genus nodes.
-        '''
-        lineages = [l.edge.lineage for l in node.leaf_iter() if hasattr(l.edge, 'lineage') and l.edge.lineage]
-        bigclade = len(lineages) >= collapse_min_nodes 
-        if bigclade and Lineage.samelast(lineages):
-            lineage = lineages[0]-top_lineage
-            if collapse_last and lineage != parent_lineage:
-                cls._collapse_node(node, lineage.last, collapse_hard)
-        else: 
-            lineage = Lineage.common(lineages)
-            if lineage: lineage = lineage-top_lineage
-            if lineage and len(lineages) > 1 and lineage.first in collapse_taxa:
-                cls._collapse_node(node, lineage.first, collapse_hard)
+        lineages = [l.edge.lineage for l in node.leaf_iter()
+                    if hasattr(l.edge, 'lineage') and l.edge.lineage]
+        lineage = Lineage.common(lineages)
+        nlins = len(lineages)
+        if lineage: lineage = lineage - top_lineage
+        if lineage and nlins  > 1 and lineage.first in collapse_taxa:
+            cls._collapse_node(node, lineage.first, collapse_hard)
+        elif (collapse_at_level and
+              nlins >= collapse_min_nodes and
+              Lineage.samefirst(lineages, collapse_at_level)):
+            cls._collapse_node(node, lineage[-1].capitalize(), collapse_hard)
         #annotate edges
         if lineage and lineage != parent_lineage:
             if node.parent_node:
                 l = (lineage-parent_lineage)
                 if l.last == Lineage.unknown: l = l[:-1]
                 if l:
-                    if node.is_internal(): node.edge.label = l.capitalize()
+                    if node.is_internal():
+                        node.edge.label = l.capitalize()
+                        if hide_support:
+                            cls._add_format(node, 'lv=0') #FIXME: does not work
+                        if hide_taxonomy:
+                            cls._add_format(node.edge, 'lv=0')
                     else:
                         if l.first and node.label.startswith(l.first.capitalize()): l = l[1:]
                         if l.last and node.label.startswith(l.last.capitalize()): l = l[:-1]
-                        if l: node.label += ' [%s]' % l.capitalize()
+                        if l and not hide_taxonomy: node.label += ' [%s]' % l.capitalize()
             #colorize edges
             if lineage_colors:
                 col = None
@@ -114,11 +126,16 @@ class PhyloUtils(MultiprocessingBase, FilenameParser):
                     if col: break
                 #construct color meta for Dendroscope
                 if col:
-                    value = ' fg=%d %d %d;' % col
+                    value = 'fg=%d %d %d' % col
+                    if hide_taxonomy: value += ' lv=0'
                     for cn in node.preorder_iter():
                         cls._add_format(cn.edge, value, replace=True)
         for child in node.child_node_iter():
-            cls._set_node_taxonomy(child, top_lineage, lineage, collapse_taxa, collapse_last, collapse_min_nodes, collapse_hard, lineage_colors)
+            cls._set_node_taxonomy(child, top_lineage, lineage,
+                                   collapse_taxa, collapse_at_level,
+                                   collapse_min_nodes, collapse_hard,
+                                   hide_support, hide_taxonomy,
+                                   lineage_colors)
 
     @classmethod
     def parse_colors(cls, colors_string):
@@ -160,14 +177,17 @@ class PhyloUtils(MultiprocessingBase, FilenameParser):
         Accepted kwargs:
         :param beautify leafs: bool (True) : replaces IDs in leafs' labels with organism names
         :param mark_leafs: list(str) : mark nodes with the specified labels in bold
-        :param collapse_taxa : list(str) : collapses all subtrees belonging to given taxa
-        :param collapse_last : bool (False) : changes display method of genus subtrees in Dendroscope to trapezium nodes
-        :param collapse_hard: bool (False) : removes collapsed subtrees, leaving a single node
+        :param collapse_taxa : list(str) : collapses subtrees belonging to given taxa
+        :param collapse_at_level : int (0) : collapses subtrees of the taxonomy of this level (1 - prokaryotes, 2 - bacteria...)
+        :param collapse_hard: bool (False) : removes collapsed subtrees, leaving a single node; otherwise collapsed
+        subtrees are displayed in Dendroscope as trapezium nodes
         :param collapse_min_nodes : int (3) : only collapse subtrees with number of leafs greater or equal than this
         :param min_support : float (0: disabled) : nodes with support less that this will be removed from the tree, children being relinked to parents
         :param reroot_at : string ('') : reroot the tree at specified leaf; special value 'midpoint' reroots the at midpoint; special value 'unroot' unroots the tree
         :param lineage_colors : dict : a dictionary of colors as (r, g, b) tuples with lowercase taxons as keys; special value 'auto' causes to automatically assign colors
-        :param top_lineage: a Lineage object to be subtracted from lineages of organisms on the tree; if not provided, it is computed automatically 
+        :param top_lineage: a Lineage object to be subtracted from lineages of organisms on the tree; if not provided, it is computed automatically
+        :param hide_support : bool (False) : if True, internal node labels with support values are hidden in Dendroscope
+        :param hide_taxonomy : bool (False) : if True, edge labels with taxonomy are hidden in Dendroscope
         '''
         with user_message('Processing tree file...', '\n'):
             tree = cls.load(treefile, schema)
@@ -195,19 +215,15 @@ class PhyloUtils(MultiprocessingBase, FilenameParser):
                         leaf.taxon.label += ' (%s)' % org.id
                     leaf.taxon.label = leaf.taxon.label.replace('_', ' ')
                 leaf.label = leaf.taxon.label
-            if min_support:
-                for node in tree.postorder_internal_node_iter(exclude_seed_node=True):
-                    try: support = float(node.label)
-                    except(ValueError, TypeError): support = min_support
-                    if support < min_support and node.edge:
-                        node.edge.collapse(adjust_collapsed_head_children_edge_lengths=True)
         #reroot the tree before traversing
-        if root_name == 'unroot':
+        if root_name == cls.reroot_unroot:
             with user_message('Unrooting tree...'):
                 tree.deroot()
-        if root_name == 'midpoint':
+        if root_name == cls.reroot_midpoint:
             with user_message('Rerooting tree at midpoint...'):
                 tree.reroot_at_midpoint(update_bipartitions=True)
+                tree.seed_node.label = 'midpoint root'
+                cls._add_format(tree.seed_node, 'nh=10 nw=10 sh=4')
         elif new_root:
             with user_message('Rerooting tree at %s...' % root_name):
                 tree.to_outgroup_position(new_root, update_bipartitions=True)
@@ -220,10 +236,19 @@ class PhyloUtils(MultiprocessingBase, FilenameParser):
             if colors == 'auto': pass#TODO
             cls._set_node_taxonomy(tree.seed_node, top_lineage, None,
                                    kwargs.pop('collapse_taxa', []), 
-                                   kwargs.pop('collapse_last', False), 
+                                   kwargs.pop('collapse_at_level', 0),
                                    kwargs.pop('collapse_min_nodes', 3), 
                                    kwargs.pop('collapse_hard', False),
+                                   kwargs.pop('hide_support', False),
+                                   kwargs.pop('hide_taxonomy', False),
                                    colors)
+        if min_support:
+            with user_message('Collapsing nodes with low support...'):
+                for node in tree.postorder_internal_node_iter(exclude_seed_node=True):
+                    try: support = float(node.label)
+                    except(ValueError, TypeError): continue
+                    if support < min_support and node.edge:
+                        node.edge.collapse(adjust_collapsed_head_children_edge_lengths=True)
         with user_message('Saving resulting tree...'):
             if not outfile: outfile = cls.strip_ext(treefile)+'.out'
             xtreefile = outfile+'.nexml'
