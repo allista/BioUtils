@@ -1,0 +1,50 @@
+#!/usr/bin/python
+# coding=utf-8
+
+import os
+
+from BioUtils.SeqUtils import Translator, SeqLoader, backup_write
+from BioUtils.Tools.Multiprocessing import MPMain
+from BioUtils.Tools.Text import FilenameParser
+
+
+class Main(MPMain):
+    description = 'Translate provided sequences using given translation table.'
+
+    def _main(self):
+        self.argument('table', metavar='int',
+                      type=int, help='A translation table to use.')
+
+        self.argument('files', metavar='/path/to/file', nargs='+',
+                      type=str, help='Paths to files with nucleotide sequences.')
+
+        self.argument('-d', '--output-dir', metavar='path', default='',
+                      type=str, help='Directory to save annotated file.')
+
+        self.parse_args()
+        # prepare translator
+        translator = Translator(self.abort_event)
+        suffix = '.trans_%d.' % self.args.table
+        # create dest dir if needed
+        if self.args.output_dir and not os.path.isdir(self.args.output_dir):
+            os.mkdir(self.args.output_dir)
+        # process sequences
+        for fname in self.args.files:
+            records = SeqLoader.load_file(fname, guess_alphabet=True)
+            if not records:
+                print 'No sequences were loaded from: %s' % fname
+                continue
+            print 'Processing: %s' % fname
+            translation = translator.translate_records(records, self.args.table)
+            if not translation:
+                print 'Unable to translate sequences.\n'
+                continue
+            oname = FilenameParser.strip_ext(fname)+suffix+FilenameParser.get_ext(fname)
+            oname = os.path.join(self.args.output_dir, oname)
+            print 'Saving results to: %s' % oname
+            backup_write(translation, oname)
+            print
+        print 'Done.'
+
+if __name__ == '__main__':
+    Main(run=True)

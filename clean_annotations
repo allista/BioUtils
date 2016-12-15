@@ -1,0 +1,89 @@
+#!/usr/bin/python
+# coding=utf-8
+
+import os
+import re
+
+from Bio.Alphabet import generic_dna
+
+from BioUtils.Tools.Multiprocessing import MPMain, parallelize_work
+from BioUtils.SeqUtils import SeqView, safe_write, filename_for_record, pretty_rec_name
+
+class Main(MPMain):
+    description = 'Remove annotations defined by qualifier name and/or value. ' \
+                  'The cleaned sequences are saved into a "cleaned" folder under ' \
+                  'the working directory in genbank format.'
+
+    def _main(self):
+        self.argument('-q', '--qualifier', metavar='regexp', required=True,
+                      type=str, help='Regular expression used to match the qualifiers.')
+        self.argument('-v', '--value', metavar='regexp', default='',
+                      type=str, help='Regular expression used to match the value of a matched qualifier.')
+        self.argument('files', metavar='/path/to/file', nargs='+',
+                      type=str, help='Paths to files with annotated sequences.')
+        self.parse_args()
+        #try to compile regexps
+        try: qual = re.compile(self.args.qualifier)
+        except Exception as e:
+            print 'Unable to compile regular expression for qualifier:\n%s' % str(e)
+            return 1
+        if self.args.value:
+            try: val = re.compile(self.args.value)
+            except Exception as e:
+                print 'Unable to compile regular expression for value:\n%s' % str(e)
+                return 2
+        #load query
+        records = SeqView.safe_load(self.args.files)
+        if not records: return 3
+        #make the directory
+        cdir = 'cleaned'
+        try: os.mkdir(cdir)
+        except OSError: pass
+        #process genomes
+        def worker(gi, db):
+            rec = db[gi]
+            removed = False
+            print 'Cleaning: %s' % pretty_rec_name(rec)
+            for i in range(len(rec.features) - 1, -1, -1):
+                feature = rec.features[i]
+                for q in feature.qualifiers:
+                    if qual.match(q) is None: continue
+                    if all(val.match(v) is None for v in feature.qualifiers[q]): continue
+                    del rec.features[i]
+                    removed = True
+            if removed:
+                rec.seq.alphabet = generic_dna
+                fname = filename_for_record(rec, 'gb')
+                safe_write(rec, os.path.join(cdir, fname))
+                return fname
+            return None
+        results = parallelize_work(self.abort_event, True, 1, worker, records.keys(), records)
+        if not results: return 4
+        for res in results:
+            if not res: continue
+            print 'Saved: %s' % res
+        #old single-process verison
+        # for rec in genomes:
+        #     removed = False
+        #     print 'Cleaning: %s' % pretty_rec_name(rec)
+        #     for i in range(len(rec.features) - 1, -1, -1):
+        #         annotation_type = rec.features[i].qualifiers.get(AnnotatorBase.type_qualifier)
+        #         if annotation_type:
+        #             if annotation_type[0] == BlastCLI.annotation_type:
+        #                 rec.features.remove(rec.features[i])
+        #                 removed = True
+        #             continue
+        #         ugene_group = rec.features[i].qualifiers.get('ugene_group')
+        #         if ugene_group and ugene_group[0] in ('blastp_annotations', 'blastn_annotations'):
+        #             rec.features.remove(rec.features[i])
+        #             removed = True
+        #     if removed:
+        #         rec.seq.alphabet = generic_dna
+        #         fname = filename_for_record(rec, 'gb')
+        #         safe_write(rec, os.path.join(cdir, fname))
+        #         print 'Saved: %s' % fname
+        print 'Done.'
+        return 0
+
+if __name__ == '__main__':
+    Main(run=True)

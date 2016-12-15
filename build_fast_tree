@@ -1,0 +1,107 @@
+#!/usr/bin/python
+# coding=utf-8
+
+'''
+Created on Mar 15, 2016
+
+@author: Allis Tauri <allista@gmail.com>
+'''
+
+import os
+
+from Bio.Alphabet import NucleotideAlphabet
+
+from BioUtils.Tools.Output import user_message
+from BioUtils.Tools.Multiprocessing import MPMain
+from BioUtils.SeqUtils import load_files, unique_records, common_alphabet
+from BioUtils.AlignmentUtils import AlignmentUtils
+from BioUtils.PhyloUtils import PhyloUtils
+from BioUtils.Taxonomy import Organisms
+
+
+class Main(MPMain):
+    description = 'Blast provided sequence, get the results, align everything and build a fast-ML tree.'
+
+    def _main(self):
+        self.argument('project', metavar='project name',
+                      type=str, help='The basename of current analysis project.')
+        self.argument('files', metavar='/path/to/file', nargs='+',
+                      type=str, help='Paths to files containing with sequences.')
+
+        # tree arguments
+        self.argument('--fasttree-args', default=[], metavar='str', nargs="*",
+                      type=str,
+                      help='Additional arguments for fasttree program in the form: '
+                           'arg1=value1 arg2=value2 arg3 arg4. Argument names should not start with "-".')
+
+        self.argument('-c', '--collapse-at-level', default=0, metavar='int',
+                      type=int,
+                      help='Collapse subtrees of the taxonomy of this level (1 - prokaryotes, 2 - bacteria...) '
+                           'with number of leafs >= 2.')
+        self.argument('-C', '--collapse-hard', default=0, metavar='int',
+                      type=int,
+                      help='Same as collapse-at-level, but the collapsed subtrees are replaced by a single node.')
+        self.argument('-r', '--reroot-at', metavar='sequence ID', default=None,
+                      type=str, help='Reroot the tree using this sequence as outgroup. Accepts special values: '
+                                     '"midpoint" and "unroot".')
+        self.argument('-m', '--min-support', default=None, metavar='float',
+                      type=float, help='Collapse splits with support < min-support.')
+        self.argument('-M', '--mark-leafs', default=None, metavar='accession',
+                      type=str, help='Mark leafs specified by accession number in Dendroscope.')
+        # self.argument('--hide-support', action='store_true',
+        #               help='Hide support values in Dendroscope by default.')
+        self.argument('--hide-taxonomy', action='store_true',
+                      help='Hide support edge taxonomy labels in Dendroscope by default.')
+        self.argument('--colors', metavar='"archaea:#f3ad6;bacteria:blue"',
+                      type=str, help='Colorize tree edges by phylogeny using provided colors '
+                                     'for Dendroscope. Both html notation and predefined color '
+                                     'names are supported.')
+        self.parse_args()
+        #handling no-project situation
+        if os.path.isfile(self.args.project):
+            self.args.files.insert(0, self.args.project)
+            self.args.project = os.path.basename(os.path.abspath(os.curdir)).replace(' ', '_')
+            print 'Basename for all files is: %s' % self.args.project
+        # load sequences
+        seqs = load_files(self.abort_event, self.args.files, guess_alphabet=True)
+        if not seqs:
+            print 'No sequence was loaded from %s' % self.args.files
+            return 1
+        seqs = list(unique_records(seqs))
+        same, alphabet = common_alphabet(seqs)
+        if not same:
+            print 'All provided sequences must be of the same alphabet.'
+            return 2
+        # alignment sequences
+        alifile = self.args.project+'.aln.fasta'
+        with user_message('\nAligning sequences...', '\n'):
+            if not AlignmentUtils.align(seqs, outfile=alifile): return 2
+
+        # build a tree
+        treefile = self.args.project+'.aln.tre'
+        with user_message('\nBuilding an approximate-ML tree with fasttree...', '\n'):
+            args = {'nt': True} if alphabet is NucleotideAlphabet else {}
+            if self.args.fasttree_args:
+                for arg in self.args.fasttree_args:
+                    av = arg.split('=')
+                    if len(av) == 1: av.append(True)
+                    args[av[0]] = av[1]
+            if not PhyloUtils.build_fast_tree(alifile, treefile, **args): return 3
+
+        # annotate the tree
+        organisms = Organisms.from_records(seqs)
+        colors = PhyloUtils.parse_colors(self.args.colors) if self.args.colors else None
+        if PhyloUtils.annotate_tree(treefile, organisms,
+                                    beautify_leafs=True,
+                                    reroot_at=self.args.reroot_at,
+                                    collapse_at_level=self.args.collapse_at_level or self.args.collapse_hard,
+                                    collapse_hard=self.args.collapse_hard,
+                                    min_support=self.args.min_support,
+                                    # hide_support=self.args.hide_support,
+                                    hide_taxonomy=self.args.hide_taxonomy,
+                                    lineage_colors=colors
+                                    ): return 0
+        return 4
+
+if __name__ == '__main__':
+    Main(run=True)

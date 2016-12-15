@@ -1,0 +1,61 @@
+#!/usr/bin/python
+# coding=utf-8
+import os
+import shlex
+
+from BioUtils.NCBI import BlastID
+from BioUtils.Tools.Misc import ListDB
+from BioUtils.NCBI import BatchEntrez
+
+from BioUtils.Tools.Multiprocessing import MPMain
+from BioUtils.SeqUtils import safe_write, filename_for_record
+
+class Main(MPMain):
+    description = 'Fetch sequences by accession numbers.'
+
+    def _main(self):
+        self.argument('email', metavar='you.address@domain.com',
+                      type=str, help='GenBank accession numbers.')
+        self.argument('accessions', metavar='ID or file', nargs='+',
+                      type=str, help='GenBank accession numbers. Or a single file with a list of them.')
+        self.parse_args()
+        #handle accession file
+        accessions = []
+        if len(self.args.accessions) == 1 and os.path.isfile(self.args.accessions[0]):
+            with open(self.args.accessions[0]) as inp:
+                for line in inp:
+                    ids = shlex.split(line, comments='#')
+                    if ids: accessions += ids
+        else: accessions = self.args.accessions
+        #process accessions
+        batches = ListDB()
+        for ID in accessions:
+            rid, db = BlastID.guess_db(ID)
+            if not rid:
+                print 'Unable to guess record type of: %s' % ID
+                continue
+            batches[db] = rid+'[Accession]'
+        if not batches:
+            print 'No valid accessions were provided.'
+            return 1
+        #fetch sequences
+        entrez = BatchEntrez(self.abort_event, self.args.email)
+        for db in batches:
+            batch = batches[db]
+            if len(batch) == 1:
+                records = entrez.get_records(batch[0], db)
+            else:
+                batch = list(set(batch))
+                records = entrez.get_records_for_terms(batch, db)
+            if not records:
+                print 'No records were fetched for:\n%s' % ', '.join(batch)
+                continue
+            for rec in records:
+                fname = filename_for_record(rec)
+                safe_write(rec, fname)
+                print 'Saved: %s' % fname
+        print 'Done'
+        return 0
+
+if __name__ == '__main__':
+    Main(run=True)
