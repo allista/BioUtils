@@ -7,9 +7,10 @@ Created on Dec 11, 2015
 @author: Allis Tauri <allista@gmail.com>
 '''
 
-import os, re
+import os, re, math
+
 from BioUtils.Tools.Output import isatty
-from BioUtils.SeqUtils import load_files
+from BioUtils.SeqUtils import load_files, pretty_rec_name, SeqView, Translator
 from BioUtils.NCBI import BlastCLI
 
 from reportlab.lib import colors
@@ -65,7 +66,9 @@ class ClusterProject(MultiprocessingBase):
     def _extract_clusters(self, tag, qual='ugene_name'):
         tagre = re.compile(tag)
         clusters = {}
-        for record in load_files(self._abort_event, self.genomes_files, 'gb'):
+        records = SeqView()
+        records.load(self.genomes_files)
+        for record in records:
             for f in record.features:
                 if qual in f.qualifiers:
                     q = ' '.join(f.qualifiers[qual])
@@ -111,21 +114,38 @@ class ClusterProject(MultiprocessingBase):
     
     @MultiprocessingBase.data_mapper_method
     def _blast_feature(self, f, c1, c2, features1, features2, evalue, max_rlen):
-        results = BlastCLI.s2s_blast(f.extract(c1), c2, evalue, command='blastn', task='blastn')
+        trans = Translator(self._abort_event)
+        cds = trans.translate(f.extract(c1), 11)
+        sixframes = trans.translate_six_frames_single(c2, 11)
+        if not sixframes: return [(None, None, None)]
+        results = []
+        for frame in sixframes:
+            res = BlastCLI.s2s_blast(cds, frame, evalue, command='blastp', task='blastp')
+            if res: results.extend(res)
         hsps = BlastCLI.all_hsps(results, max_rlen)
         if not hsps: return [(None, None, None)]
         f1 = []
         f2 = []
         col = []
+        c1_name = pretty_rec_name(c1)
+        if 'locus_tag' in f.qualifiers:
+            fname = f.qualifiers['locus_tag'][0]
+        else: fname = 'CDS'
+        cds_len = len(cds)
         for hsp in hsps:
-            col.append(colors.linearlyInterpolatedColor(colors.Color(1,1,1,0.2), colors.Color(0,0,0,0.2), 
-                                                        0, 1, float(hsp.identities)/hsp.align_length))
-            f1.append(SeqFeature(FeatureLocation(f.location.start+hsp.query_start, 
-                                                 f.location.start+hsp.query_start+hsp.align_length, strand=0)))
-            f2.append(SeqFeature(FeatureLocation(hsp.sbjct_start, hsp.sbjct_start+hsp.align_length, strand=0)))
+            color_t = (float(hsp.identities)/hsp.align_length)
+            print '%s %s: %5.1f%% (%5.1f%%)' % (c1_name, fname, color_t*100, float(hsp.identities)/cds_len*100)
+            col.append(colors.linearlyInterpolatedColor(colors.Color(0,0,1,0.2), colors.Color(0,1,0,0.2),
+                                                        0.2, 1, color_t))
+            qstart = (hsp.query_start-1)*3
+            qend = qstart+hsp.align_length*3
+            sstart = (hsp.sbjct_start-1)*3
+            send = sstart+hsp.align_length*3
+            f1.append(SeqFeature(FeatureLocation(f.location.start+qstart, f.location.start+qend, strand=hsp.strand[0])))
+            f2.append(SeqFeature(FeatureLocation(sstart, send, strand=hsp.strand[1])))
         return zip(f1, f2, col)
     
-    @MultiprocessingBase.results_assembler_methd
+    @MultiprocessingBase.results_assembler_method
     def _compose_crosslink(self, index, result, features1, features2):
         for f1, f2, col in result:
             if f1 is None: continue
@@ -135,7 +155,7 @@ class ClusterProject(MultiprocessingBase):
     
     def _compose_crosslinks(self, cluster_ids, evalue, max_rlen):
         if not self.diagram or not self.fsets: return
-        print 'Finding crosslinks between genes in the cluster.'
+        print 'Finding crosslinks between _genes in the cluster.'
         num_cids = len(cluster_ids)
         for ci, cid1 in enumerate(cluster_ids):
             if ci >= num_cids-1: break
@@ -174,12 +194,13 @@ class ClusterProject(MultiprocessingBase):
             clen = len(cluster)
             if clen > max_len: max_len = clen
             track = self.diagram.new_track(1,
-                                      name=cluster.description,
-                                      greytrack=True, height=0.4,
-                                      greytrack_fontcolor=colors.black,
-                                      greytrack_labels=1,
-                                      scale=False,
-                                      start=0, end=clen)
+                                           name=cluster.description,
+                                           greytrack=1, height=0.4,
+                                           greytrack_fontcolor=colors.black,
+                                           greytrack_labels=1,
+                                           greytrack_fontsize=6,
+                                           scale=False,
+                                           start=0, end=clen)
             self.fsets[cid] = track.new_set()
         #add crosslink features
         if add_crosslinks:
@@ -192,17 +213,24 @@ class ClusterProject(MultiprocessingBase):
             i = 1
             for f in cluster.features:
                 if f.type != 'CDS': continue
-                fname = genes[i-1] if i <= len(genes) else 'CDS_%d' % i
+                fname = ''
+                if i <= len(genes):
+                    fname = genes[i-1]
+                # elif 'locus_tag' in f.qualifiers:
+                #     fname = f.qualifiers['locus_tag'][0]
+                # else:
+                #     fname = 'CDS_%d' % i
+
                 fcol = cols[i-1] if i <= len(cols) else colors.grey
                 self.fsets[cid].add_feature(f, sigil="BIGARROW",
                                             color=fcol, 
                                             border = colors.black if border else fcol,
                                             name = fname, label=True,
                                             label_position="middle",
-                                            label_size = 8, label_angle=45)
+                                            label_size = 8, label_angle=15)
                 i += 1
         self.diagram.draw(format="linear", pagesize=pagesize, fragments=1,
-                     start=0, end=max_len)
+                          start=0, end=max_len)
         for ptype in ('PDF', 'EPS', 'SVG'):
             self.diagram.write(os.path.join(self.dirname, '%s.%s' %
                                             (self.proj, ptype.lower())), ptype)
@@ -272,37 +300,38 @@ def CO_cluster(abort_event, color = True, force = False, print_ids = False, add_
                    'unknown',
                    'mbhH', 'mbhM', 'mbh K+L', 'mbhN', 'mbhJ',
                    'mbhB', 'mbhC', 'mbhD', 'mbh E+F', 'mbhG', 'mbhA', 'mbhH\'\'\'')
-    
+
     AM4_genes = list(other_genes)
     AM4_genes.insert(5, 'unknown')
-    
-    if color: #TODO: change colors for CO cluster
-        other_colors = [colors.Color(1,69.0/255)]*2 + \
-                     [colors.red]*6 + \
-                     [colors.Color(1,185.0/255), colors.darkgreen, colors.darkmagenta] + \
-                     [colors.aqua]*7
-                     
+
+    if color:
+        other_colors = [colors.Color(1,69.0/255)] * 2 + \
+                       [colors.Color(1,185.0/255)] * 3 + \
+                       [colors.darkgreen] + \
+                       [colors.red] * 5 + \
+                       [colors.aqua] * 7
+
         AM4_colors = list(other_colors)
-        AM4_colors.insert(2, colors.red)
-                     
-        
+        AM4_colors.insert(5, colors.darkgreen)
+
+
     else:
         other_colors = [grey(0.2)]*2 + \
                      [grey(0.3)]*3 + \
                      [grey(0.1)]+ \
                      [grey(0.5)]*5 + \
                      [grey(0.95)]*7
-                     
+
         AM4_colors = list(other_colors)
         AM4_colors.insert(5, grey(0.1))
-        
-                 
+
+
     cluster_ids = ('TBCH5-COC-full',
                    'TBMP-COC-full',
                    'TAM4-COC-full',
                    'TONA1-COC-full',
                    )
-    
+
     for cid in cluster_ids:
         if cid == 'TAM4-COC-full':
             proj.genes[cid] = AM4_genes
@@ -314,10 +343,140 @@ def CO_cluster(abort_event, color = True, force = False, print_ids = False, add_
     proj.draw_clusters(cluster_ids, add_crosslinks=add_crosslinks)
 #end
 
+def GBCO_cluster(abort_event, color=True, force=False, print_ids=False, add_crosslinks=True):
+    proj = ClusterProject('CO Clusters', u'/home/allis/Documents/INMI/Geobacillus-COX', abort_event)
+    if not proj.get_clusters(genomes_dir, '.+\-COC\-full', force=force, print_ids=print_ids): return
+
+    # CO cluster specifics
+    # other_genes = ('corQ', 'corR', 'cooF', 'cooS', 'cooC',
+    #                'unknown',
+    #                'mbhH', 'mbhM', 'mbh K+L', 'mbhN', 'mbhJ',
+    #                'mbhB', 'mbhC', 'mbhD', 'mbh E+F', 'mbhG', 'mbhA', 'mbhH\'\'\'')
+    #
+    # AM4_genes = list(other_genes)
+    # AM4_genes.insert(5, 'unknown')
+    #
+    # if color:
+    #     other_colors = [colors.Color(1, 69.0 / 255)] * 2 + \
+    #                    [colors.Color(1, 185.0 / 255)] * 3 + \
+    #                    [colors.darkgreen] + \
+    #                    [colors.red] * 5 + \
+    #                    [colors.aqua] * 7
+    #
+    #     AM4_colors = list(other_colors)
+    #     AM4_colors.insert(5, colors.darkgreen)
+    #
+    #
+    # else:
+    #     other_colors = [grey(0.2)] * 2 + \
+    #                    [grey(0.3)] * 3 + \
+    #                    [grey(0.1)] + \
+    #                    [grey(0.5)] * 5 + \
+    #                    [grey(0.95)] * 7
+    #
+    #     AM4_colors = list(other_colors)
+    #     AM4_colors.insert(5, grey(0.1))
+    #
+    cluster_ids = ('GB-L20-COC-full',
+                   'PGB-COC-full',
+                   'GB-Y4-COC-full',
+                   'CABSUB-MB4-COC-full',
+                   'CABSUB-Pac-COC-full',
+                   )
+    #
+    # for cid in cluster_ids:
+    #     if cid == 'TAM4-COC-full':
+    #         proj._genes[cid] = AM4_genes
+    #         proj.colors[cid] = AM4_colors
+    #     else:
+    #         proj._genes[cid] = other_genes
+    #         proj.colors[cid] = other_colors
+    proj.genes['GB-L20-COC-full'] = ['GBL20_%d' % i for i in range(1256, 1270)]
+
+    proj.draw_clusters(cluster_ids, add_crosslinks=add_crosslinks)
+
+
+def GBCOX_cluster(abort_event, color=True, force=False, print_ids=False, add_crosslinks=True):
+    proj = ClusterProject('CoxL-Clusters', u'/home/allis/Documents/INMI/Geobacillus-COX/', abort_event)
+    if not proj.get_clusters(genomes_dir, '.+\_CoxL\-full', force=force, print_ids=print_ids): return
+
+    # CO cluster specifics
+    # other_genes = ('corQ', 'corR', 'cooF', 'cooS', 'cooC',
+    #                'unknown',
+    #                'mbhH', 'mbhM', 'mbh K+L', 'mbhN', 'mbhJ',
+    #                'mbhB', 'mbhC', 'mbhD', 'mbh E+F', 'mbhG', 'mbhA', 'mbhH\'\'\'')
+    #
+    # AM4_genes = list(other_genes)
+    # AM4_genes.insert(5, 'unknown')
+    #
+    # if color:
+    #     other_colors = [colors.Color(1, 69.0 / 255)] * 2 + \
+    #                    [colors.Color(1, 185.0 / 255)] * 3 + \
+    #                    [colors.darkgreen] + \
+    #                    [colors.red] * 5 + \
+    #                    [colors.aqua] * 7
+    #
+    #     AM4_colors = list(other_colors)
+    #     AM4_colors.insert(5, colors.darkgreen)
+    #
+    #
+    # else:
+    #     other_colors = [grey(0.2)] * 2 + \
+    #                    [grey(0.3)] * 3 + \
+    #                    [grey(0.1)] + \
+    #                    [grey(0.5)] * 5 + \
+    #                    [grey(0.95)] * 7
+    #
+    #     AM4_colors = list(other_colors)
+    #     AM4_colors.insert(5, grey(0.1))
+    #
+    cluster_ids =  [
+        # putative form III CoxL clusters
+        'GBL20_CoxL-full',
+        'GBY4_CoxL-full',
+        'PBTG_DSM2543_CoxL-full',
+        'GB_GHH01_CoxL-full',
+        'FBEN_CoxL-full',
+        'BALV_CoxL-full',
+        # incomplete form III CoxL clusters
+        'BLIG_CoxL-full',
+        'DBIO_CoxL-full',
+        # form I CoxL clusters
+        'OLCV_OM5_CoxL-full',
+        'AE_MLHE1_CoxL-full',
+        'MEPL_CoxL-full',
+        'HBSG_DSM2000_CoxL-full',
+        'MBSM_MC2_CoxL-full',
+        'PBX_LB400_CoxL-full',
+    ]
+    #
+    # for cid in cluster_ids:
+    #     if cid == 'TAM4-COC-full':
+    #         proj._genes[cid] = AM4_genes
+    #         proj.colors[cid] = AM4_colors
+    #     else:
+    #         proj._genes[cid] = other_genes
+    #         proj.colors[cid] = other_colors
+    GBL20 = ['GBL20_%d' % i for i in range(2076, 2030, -1)]
+    GBL20[1] = 'coxI'
+    GBL20[3] = 'coxL'
+    GBL20[4] = 'coxG'
+    GBL20[5] = 'coxM'
+    GBL20[6] = 'coxS'
+    proj.genes['GBL20_CoxL-full'] = GBL20
+    proj.genes['OLCV_OM5_CoxL-full'] = ['coxB','coxC','coxM','coxS','coxL','coxD','coxE','coxF','coxG','coxH','coxH2','coxI']
+
+    proj.draw_clusters(cluster_ids, evalue=0.000001, max_rlen=0.1, add_crosslinks=add_crosslinks)
+
+
+# end
+
 if __name__ == '__main__':
     from multiprocessing import Event
     abort_event = Event()
-    genomes_dir = u'/home/allis/Dropbox/Science/Микра/Thermococcus/sequence/GenBank/Thermococcus'
-    FC_cluster(abort_event, color=True, force=False, add_crosslinks=False)
-#    CO_cluster(color=False, force=False, add_crosslinks=False)
+    genomes_dir = u'/home/allis/Documents/INMI/Geobacillus-COX/genomes/blastp_annotated'
+    # FC_cluster(abort_event, color=True, force=False, add_crosslinks=False)
+    # CO_cluster(abort_event, color=True, force=False, add_crosslinks=False)
+    # GBCO_cluster(abort_event, color=True, force=False, add_crosslinks=True)
+    GBCOX_cluster(abort_event, color=True, force=False, print_ids=True, add_crosslinks=True)
     print 'Done'
