@@ -8,7 +8,7 @@ from Bio.Alphabet import generic_dna
 from BioUtils.AlignmentUtils import AlignmentUtils
 from BioUtils.Tools.Text import FilenameParser
 from BioUtils.Tools.Multiprocessing import MPMain
-from BioUtils.SeqUtils import SeqView, pretty_rec_name, safe_write, filename_for_record
+from BioUtils.SeqUtils import SeqView, pretty_rec_name, safe_write, filename_for_record, backup_write
 from BioUtils.HMMER3 import Hmmer
 
 
@@ -19,18 +19,21 @@ class Main(MPMain):
         self.argument('files', metavar='/path/to/file', nargs='+',
                       type=str, help='Paths to files with genomes.')
 
-        self.argument('-H', '--hmm', metavar='profile.hmm', default='',
+        self.argument('-H', '--hmm', metavar='profile.hmm', default=[], nargs='+',
                       type=str, help='Search for patterns using this HMM profile.')
 
-        self.argument('-A', '--alignment', metavar='alignment.file', default='',
+        self.argument('-A', '--alignment', metavar='alignment.file', default=[], nargs='+',
                       type=str, help='Build a HMM profile from this alignment and use it.')
 
         self.argument('-t', '--translation-table', metavar='number', default=11,
                       type=int, help='A translation table to use to translate genomes.')
 
+        self.argument('-d', '--output-dir', metavar='path', default='',
+                      type=str, help='Directory to save annotated file.')
+
         self.parse_args()
         #check arguments
-        if not os.path.isfile(self.args.hmm) and not os.path.isfile(self.args.alignment):
+        if not self.args.hmm and not self.args.alignment:
             print 'Either a HMM profile or an alignment should be provided to perform the search.'
             return 1
         #load files
@@ -39,29 +42,36 @@ class Main(MPMain):
         #creating Hmmer
         hmmer = Hmmer(self.abort_event)
         #prepare HMMS
-        if self.args.hmm: hmm = self.args.hmm
-        else:
-            ali = AlignmentUtils.load_first(self.args.alignment)
-            if ali is None:
-                print 'Unable to load alignment from: %s' % self.args.alignment
-                return 3
-            hmm = self.args.alignment+'.hmm'
-            hmm_name = FilenameParser.strip_ext(os.path.basename(self.args.alignment))
-            print 'Building HMM profile: %s' % hmm
-            if not hmmer.hmmbuild(ali, hmm, hmm_name):
-                return 4
+        hmms = self.args.hmm
+        if self.args.alignment:
+            for ali_file in self.args.alignment:
+                for ali in AlignmentUtils.load(ali_file):
+                    if ali is None:
+                        print 'Unable to load alignment from: %s' % ali_file
+                        continue
+                    hmm = ali_file+'.hmm'
+                    hmm_name = FilenameParser.strip_ext(os.path.basename(ali_file))
+                    print 'Building HMM profile: %s' % hmm
+                    if hmmer.hmmbuild(ali, hmm, hmm_name):
+                        hmms.append(hmm)
             print 'Done'
+        if not hmms:
+            print 'No profiles was provided or built from alignments.'
+            return 3
+        # create dest dir if needed
+        if self.args.output_dir and not os.path.isdir(self.args.output_dir):
+            os.mkdir(self.args.output_dir)
         #process genomes
-        for g in genomes:
-            print 'Processing: %s' % pretty_rec_name(g)
-            results = hmmer.hmmsearch_genome(hmm, g, table=self.args.translation_table, decorate=True)
+        ngenomes = len(genomes)
+        for gi, g in enumerate(genomes):
+            print 'Processing: %s (%d/%d)' % (pretty_rec_name(g), gi+1, ngenomes)
+            results = hmmer.hmmsearch_genome(hmms, g, table=self.args.translation_table, decorate=True)
             if results:
                 fname = filename_for_record(g, 'hmm_annotated.gb')
+                fname = os.path.join(self.args.output_dir, fname)
                 print 'Saving results to: %s' % fname
-                if os.path.isfile(fname):
-                    os.rename(fname, fname+'.back')
                 g.seq.alphabet = generic_dna
-                safe_write(g, fname)
+                backup_write(g, fname)
             else: print 'No patterns were found.'
             print ""
         print 'Done.'

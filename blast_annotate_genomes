@@ -9,14 +9,15 @@ from BioUtils.NCBI import BlastCLI
 from Bio.Alphabet import generic_dna, ProteinAlphabet
 
 from BioUtils.Tools.Multiprocessing import MPMain
-from BioUtils.SeqUtils import SeqView, pretty_rec_name, safe_write, SeqLoader, filename_for_record
+from BioUtils.SeqUtils import SeqView, pretty_rec_name, load_files, filename_for_record, backup_write
 
 
 class Main(MPMain):
     description = 'Use blast(p/n) to find patterns and annotate given genomes.'
 
     def _main(self):
-        self.argument('query', metavar='/path/to/sequence.file',
+        self.argument('-q', '--query', metavar='/path/to/sequence.file', nargs='+',
+                      required=True,
                       type=str, help='Search for patterns using sequences from this file.')
 
         self.argument('files', metavar='/path/to/file', nargs='+',
@@ -24,43 +25,50 @@ class Main(MPMain):
 
         self.argument('-e', '--evalue', metavar='float', default=0.0001,
                       type=float, help='E-value results filter.')
+        self.argument('-i', '--min-identity', default=0, metavar='float',
+                      type=float, help='Filter out alignments with identity percent less then this. Default 0')
 
         self.argument('-t', '--translation-table', metavar='number', default=11,
                       type=int, help='A translation table to use to translate genomes '
                                      'if protein sequences are given.')
 
+        self.argument('-d', '--output-dir', metavar='path', default='',
+                      type=str, help='Directory to save annotated file.')
+
         self.parse_args()
         #load query
-        if not os.path.isfile(self.args.query):
-            print 'File not found: %s' % self.args.query
-            return 1
-        query = SeqLoader.load_file(self.args.query, guess_alphabet=True)
+        query = load_files(self.abort_event, self.args.query, guess_alphabet=True)
         if not query:
             print 'No sequences were loaded from: %s' % self.args.query
             return 2
         #check alphabet
-        alphabet = query[0].seq.alphabet
-        if not all(q.seq.alphabet == alphabet for q in query):
-            print 'All query sequences should be of the same type (protein or nucleotide)'
+        alphabet = type(query[0].seq.alphabet)
+        if not all(isinstance(q.seq.alphabet, alphabet) for q in query):
+            print 'All query sequences should be of the same type (protein or nucleotide).\n' \
+                  'Got: %s' % ', '.join(str(q.seq.alphabet) for q in query)
             return 3
         #load genomes
         genomes = SeqView.safe_load(self.args.files)
         if not genomes: return 4
-        #process genomes
+        #prepare blast annotator
         blast = BlastCLI(self.abort_event)
-        protein = isinstance(alphabet, ProteinAlphabet)
+        protein = issubclass(alphabet, ProteinAlphabet)
         suffix = 'blastp_annotated.gb' if protein else 'blastn_annotated.gb'
-        annotate = blast.blastp_annotate if protein else partial(blast.blastn_annotate,
-                                                                 table=self.args.translation_table)
-        for g in genomes:
-            print 'Processing: %s' % pretty_rec_name(g)
-            if annotate(query, g, evalue=self.args.evalue):
+        annotate = (partial(blast.blastp_annotate, table=self.args.translation_table)
+                    if protein else blast.blastn_annotate)
+        # create dest dir if needed
+        if self.args.output_dir and not os.path.isdir(self.args.output_dir):
+            os.mkdir(self.args.output_dir)
+        # process genomes
+        ngenomes = len(genomes)
+        for gi, g in enumerate(genomes):
+            print 'Processing: %s (%d/%d)' % (pretty_rec_name(g), gi+1, ngenomes)
+            if annotate(query, g, self.args.min_identity, self.args.evalue):
                 fname = filename_for_record(g, suffix)
+                fname = os.path.join(self.args.output_dir, fname)
                 print 'Saving results to: %s' % fname
-                if os.path.isfile(fname):
-                    os.rename(fname, fname+'.back')
                 g.seq.alphabet = generic_dna
-                safe_write(g, fname)
+                backup_write(g, fname)
             else: print 'No patterns were found.'
             print ""
         print 'Done.'
