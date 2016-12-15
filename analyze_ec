@@ -21,8 +21,7 @@ from Bio.SeqRecord import SeqRecord
 from Bio import SeqIO
 from Bio.SearchIO.HmmerIO.hmmer3_text import Hmmer3TextParser 
 from Bio.Align.Applications import MuscleCommandline, MafftCommandline
-from Bio.Phylo.Applications import FastTreeCommandline, RaxmlCommandline
-from reportlab.lib import colors
+from Bio.Phylo.Applications import FastTreeCommandline
 import dendropy as dp
 from xml.dom import minidom
 
@@ -37,6 +36,7 @@ from BioUtils.NCBI.Applications import FormatDBCommandline
 from BioUtils.HMMER3.Applications import HMMBuildCommandline, HMMSearchCommandline
 from BioUtils.HMMER3 import Hmmer
 from BioUtils.SeqUtils import SeqLoader, num_fasta_records, unique_records, mktmp_fasta, safe_parse, safe_write
+from BioUtils.PhyloUtils import PhyloUtils
 
 
 class EC_Analyzer(MultiprocessingBase):
@@ -127,14 +127,14 @@ class EC_Analyzer(MultiprocessingBase):
         return True
     
     @PipelineNode.new(msg='fetch KEGG record for EC')
-    def _fetch_ec_record(self, refcile):
+    def _fetch_ec_record(self, recfile):
         print 'Fetching KEGG record for EC: %s'  % self.ec
         #make a directory to store gene files
         try: os.mkdir(self.genesdir)
         except OSError: pass
         #fetch a record for the needed enzyme
         if not KEGG_cmd(REST.kegg_get, 'ec:'+self.ec, 
-                        self.recfile, 'Unable to get record for EC: %s' % self.ec):
+                        recfile, 'Unable to get record for EC: %s' % self.ec):
             return False
         return True
     
@@ -255,7 +255,7 @@ class EC_Analyzer(MultiprocessingBase):
     def _psiblast_data(self, psifile, msafile):
         with user_message('Running remote psi-blast query. This will take a wile...', '\n'):
             BlastCLI.blast('psiblast', evalue=self.psi_evalue,
-                           parse_results=True, save_results_to=psifile, 
+                           parse_results=False, save_results_to=psifile,
                            in_msa=msafile, max_target_seqs=self.max_targets,
                            db='nr', remote=True)
         return True
@@ -268,7 +268,8 @@ class EC_Analyzer(MultiprocessingBase):
                 results = list(NCBIXML.parse(inp))
         #fetch records from hit ids
         with user_message('Fetching records from psi-blast results. This will take a wile...', delimiter='\n'):
-            records = BlastWWW.fetch_results(self.email, results, from_dbs=['protein'], what='record')
+            blast = BlastWWW(self._abort_event)
+            records = blast.fetch_results(self.email, results, from_dbs=['protein'], what='record')
         if not records:
             print 'No records was fetched from psi-blast results.\n'
             return False
@@ -440,7 +441,7 @@ class EC_Analyzer(MultiprocessingBase):
         results = []
         hmmer = Hmmer(self._abort_event)
         for genome in genomes:
-            result = hmmer.hmmsearch_genome(hmmfile, genome, table=11)
+            result = hmmer.hmmsearch_genes(hmmfile, genome, table=11)
             if result: results.extend((result[fi][1] for fi in result))
         if not results:
             print 'No additional genes found.\n'
@@ -700,8 +701,8 @@ class Main(MPMain):
         psi.add_argument('-H', '--hmm-filter', default=-1, type=float, metavar='evalue',
                             help='Filter psi-blast results with HMM profile using evalue cutoff. '
                             'Implies --hmm')
-        psi.add_argument('--homologs-filter', default=-1, type=float, metavar='%identity',
-                            help='Filter out close homologs from psi-blast results using blast %identity cutoff')
+        psi.add_argument('--homologs-filter', default=-1, type=float, metavar='percent identity',
+                            help='Filter out close homologs from psi-blast results using blast percent identity cutoff')
         
         tree = parser.add_argument_group('Tree options')
         tree.add_argument('-t', '--build-tree', action='store_true',
@@ -774,17 +775,7 @@ class Main(MPMain):
         if args.build_tree:
             if not proj.build_tree(): return 4
             #parse colors
-            lineage_colors = None 
-            if args.colors:
-                lineage_colors = dict()
-                for col in args.colors.split(';'): 
-                    lc = col.strip().split(':') 
-                    if len(lc) == 2: 
-                        col = lc[1]
-                        if col.startswith('#'):
-                            col = colors.HexColor(col)
-                        else: col = getattr(colors, col, None)
-                        if col: lineage_colors[lc[0]] = col
+            lineage_colors = PhyloUtils.parse_colors(args.colors) if args.colors else None
             #process the tree
             proj.process_tree(collapse_genera=args.collapse_genera, 
                               collapse_min_nodes=args.collapse_genera if args.collapse_genera else 3,
