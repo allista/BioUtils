@@ -10,19 +10,20 @@ Created on May 28, 2015
 import os
 import sys
 import argparse
-from Bio import SeqIO
 
+from Bio import SeqIO
 
 def rename_file(old, new):
     if not os.path.isfile(new+'.gb'):
-        fname = lambda: '%s.gb' % new
+        new = '%s.gb' % new
     else:
         ind  = 1
         fname = lambda: '%s_%03d.gb' % (new, ind)
         while os.path.isfile(fname()): ind += 1
-    if old == fname(): return
-    os.rename(old, fname())
-    print '%s -> %s' % (old, fname())
+        new = fname()
+    if old == new: return
+    print '%s -> %s' % (old, new)
+    os.rename(old, new)
 
 
 def get_organism(filename):
