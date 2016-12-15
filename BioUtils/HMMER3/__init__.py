@@ -10,21 +10,23 @@ import sys, os
 
 from Bio.Align import MultipleSeqAlignment
 from Bio.SearchIO.HmmerIO import Hmmer3TextParser
-from Bio.SeqFeature import SeqFeature, FeatureLocation
+from Bio.SeqFeature import FeatureLocation
 
 from BioUtils.Tools.Multiprocessing import MultiprocessingBase, cpu_count
 from BioUtils.Tools.Text import FilenameParser
 from BioUtils.Tools.Misc import mktmp_name, run_cline
 from BioUtils.Tools.Output import user_message
-from BioUtils.SeqUtils import mktmp_fasta, Translator, get_indexes_of_genes
+from BioUtils.SeqUtils import mktmp_fasta, Translator, get_indexes_of_all_genes
 from BioUtils.HMMER3.Applications import HMMSearchCommandline, HMMBuildCommandline
 from BioUtils.AlignmentUtils import AlignmentUtils
+from BioUtils.Annotation import HSPAnnotator
 
 
-class Hmmer(MultiprocessingBase):
+class Hmmer(MultiprocessingBase, HSPAnnotator):
     
     def __init__(self, abort_event):
         super(Hmmer, self).__init__(abort_event)
+        HSPAnnotator.__init__(self)
         
     @staticmethod
     def hmmbuild(alignment, outfile, name=None, **kwargs):
@@ -67,10 +69,24 @@ class Hmmer(MultiprocessingBase):
         finally:
             os.unlink(recfile)
             os.unlink(hmm_out)
-    
+
+    annotation_type = 'hmmer'
+
+    def hsp_score(self, hsp):
+        return float(hsp.bitscore)
+
+    def hsp2feature(self, name, group, location, hsp):
+        feature = super(Hmmer, self).hsp2feature(name, group, location, hsp)
+        feature.qualifiers['hmm_model'] = name
+        feature.qualifiers['evalue'] = hsp.evalue
+        feature.qualifiers['evalue_cond'] = hsp.evalue_cond
+        feature.qualifiers['acc_average'] = hsp.acc_avg
+        feature.qualifiers['bias'] = hsp.bias
+        return feature
+
     def hmmsearch_genes(self, hmms, genome, table='Standard', decorate=False, **kwargs):
         #get _genes
-        genes = get_indexes_of_genes(genome)
+        genes = get_indexes_of_all_genes(genome)
         if not genes: return None
         for gene_id, gi in enumerate(genes):
             genome.features[gi].qualifiers['feature_id'] = gi
@@ -84,7 +100,7 @@ class Hmmer(MultiprocessingBase):
         results = dict()
         for hmm in hmms:
             with user_message('Performing hmm search.'):
-                hmm_results = self.hmmsearch_recs(hmm, translation)
+                hmm_results = self.hmmsearch_recs(hmm, translation, **kwargs)
             if not hmm_results: return None
             with user_message('Parsing search results...'):
                 #get hit_ids of hmm matches
@@ -115,7 +131,7 @@ class Hmmer(MultiprocessingBase):
                                 hmm_location = FeatureLocation(feature.location.end-hsp.hit_end*3,
                                                                feature.location.end-hsp.hit_start*3,
                                                                feature.strand)
-                            hmm_feature = self._hsp2feature(hmm_name, 'HMM_annotations', hmm_location, hsp)
+                            hmm_feature = self.hsp2feature(hmm_name, 'HMM_annotations', hmm_location, hsp)
                             genome.features.append(hmm_feature)
         return results if results else None
 
@@ -129,8 +145,8 @@ class Hmmer(MultiprocessingBase):
         results = []
         for hmm in hmms:
             with user_message('Performing hmm search.'):
-                hmm_results = self.hmmsearch_recs(hmm, translation)
-            if not any(len(r) > 0 for r in results): continue
+                hmm_results = self.hmmsearch_recs(hmm, translation, **kwargs)
+            if not any(len(r) for r in hmm_results): continue
             results += hmm_results
             #decorate genome
             if decorate:
@@ -152,18 +168,6 @@ class Hmmer(MultiprocessingBase):
                                     hmm_location = FeatureLocation(glen-start-hsp.hit_end*3,
                                                                    glen-start-hsp.hit_start*3,
                                                                    strand)
-                                hmm_feature = self._hsp2feature(hmm_name, 'HMM_annotations', hmm_location, hsp)
+                                hmm_feature = self.hsp2feature(hmm_name, 'HMM_annotations', hmm_location, hsp)
                                 genome.features.append(hmm_feature)
         return results if results else None
-
-    def _hsp2feature(self, name, group, location, hsp):
-        feature = SeqFeature(location, type='misc_feature')
-        feature.qualifiers['ugene_name'] = name
-        feature.qualifiers['ugene_group'] = group
-        feature.qualifiers['hmm_model'] = name
-        feature.qualifiers['bitscore'] = hsp.bitscore
-        feature.qualifiers['evalue'] = hsp.evalue
-        feature.qualifiers['evalue_cond'] = hsp.evalue_cond
-        feature.qualifiers['acc_average'] = hsp.acc_avg
-        feature.qualifiers['bias'] = hsp.bias
-        return feature

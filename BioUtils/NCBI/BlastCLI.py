@@ -17,7 +17,7 @@ from itertools import chain
 from random import shuffle
 
 from Bio import SeqIO
-from Bio.SeqFeature import SeqFeature, FeatureLocation
+from Bio.SeqFeature import FeatureLocation
 from Bio.SeqRecord import SeqRecord
 from Bio.Blast import NCBIXML
 from Bio.Blast import Applications as BPApps
@@ -30,11 +30,12 @@ from BioUtils.Tools.Text import random_text
 from BioUtils.Tools.Misc import mktmp_name, safe_unlink, run_cline
 from BioUtils.Tools.Output import user_message, Progress, ProgressCounter
 from BioUtils.SeqUtils import mktmp_fasta, cat_records, Translator, pretty_rec_name
+from BioUtils.Annotation import HSPAnnotator
 
 from .Applications import BlastDBcmdCommandline, FormatDBCommandline
 from .BlastBase import _BlastBase
 
-class BlastCLI(MultiprocessingBase, _BlastBase):
+class BlastCLI(MultiprocessingBase, _BlastBase, HSPAnnotator):
 
     _clines = {
             'blastp'     : BPApps.NcbiblastpCommandline, 
@@ -60,7 +61,8 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
 
     def __init__(self, abort_event):
         super(BlastCLI, self).__init__(abort_event)
-        _BlastBase.__init__(self)
+        _BlastBase.__init__(self, abort_event)
+        HSPAnnotator.__init__(self)
     
     @classmethod
     def blast(cls, command, **kwargs):
@@ -617,50 +619,68 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
             return homologues
         return BlastCLI._filter_homologues(get_all_homologues, seqs, min_identity, keep_ids, nucleotide)
 
-    @staticmethod
-    def hsp2feature(name, group, location, hsp, letter_length=1):
-        feature = SeqFeature(location, type='misc_feature')
-        feature.qualifiers['ugene_group'] = group
-        feature.qualifiers['ugene_name'] = name
-        feature.qualifiers['blast_tag'] = name
+    annotation_type = 'blast'
+
+    def hsp_score(self, hsp):
+        return hsp.identities/float(hsp.align_length)*100
+
+    def hsp2feature(self, name, group, location, hsp):
+        feature = super(BlastCLI, self).hsp2feature(name, group, location, hsp)
         feature.qualifiers['bitscore'] = hsp.bits
         feature.qualifiers['evalue'] = hsp.expect
         feature.qualifiers['gaps'] = hsp.gaps
         feature.qualifiers['identities'] = hsp.identities
         feature.qualifiers['align_length'] = hsp.align_length
-        feature.qualifiers['letter_length'] = letter_length
-        feature.qualifiers['percent'] = hsp.identities/float(hsp.align_length)*100
+        feature.qualifiers['percent'] = self.hsp_score(hsp)
+        feature.qualifiers['query_start'] = hsp.query_start
+        feature.qualifiers['query_end'] = hsp.query_end
         return feature
 
-    def blastn_annotate(self, tag_sequences, subject_record, evalue=0.001, **kwargs):
+    @staticmethod
+    def add_program(feature, program):
+        feature.qualifiers['program'] = program
+
+    def blastn_annotate(self, tag_sequences, subject_record, min_identity, evalue=0.001, **kwargs):
         results = self.s2s_blast_batch(tag_sequences, [subject_record], evalue=evalue, command='blastn', **kwargs)
         if results is None: return False
-        for i, tag in enumerate(tag_sequences):
-            if not results[i]: continue
-            record = results[i][0]
-            tag_name = pretty_rec_name(tag)
-            if tag_name != tag.id:
-                tag_name += ' (%s)' % tag.id
-            if not record: return False
-            for hit in record:
-                for ali in hit.alignments:
-                    for hsp in ali.hsps:
-                        location = FeatureLocation(hsp.sbjct_start-1,
-                                                   hsp.sbjct_end,
-                                                   hsp.strand[1])
-                        feature = self.hsp2feature(tag_name,'blastn_annotations', location, hsp)
-                        subject_record.features.append(feature)
-        return True
+        with user_message('Adding results as annotations...'):
+            annotated = False
+            for i, tag in enumerate(tag_sequences):
+                if not results[i]: continue
+                record = results[i][0]
+                if not record: continue
+                tag_name = pretty_rec_name(tag)
+                if tag_name != tag.id:
+                    tag_name += ' (%s)' % tag.id
+                for hit in record:
+                    for ali in hit.alignments:
+                        for hsp in ali.hsps:
+                            if hsp.identities / float(hsp.align_length) < min_identity: continue
+                            strand = 1 if hsp.sbjct_start < hsp.sbjct_end else -1
+                            if strand == 1:
+                                location = FeatureLocation(hsp.sbjct_start-1,
+                                                           hsp.sbjct_end,
+                                                           strand)
+                            else:
+                                location = FeatureLocation(hsp.sbjct_end-1,
+                                                           hsp.sbjct_start,
+                                                           strand)
+                            feature = self.hsp2feature(tag_name,'blastn_annotations', location, hsp)
+                            self.add_program(feature, 'blastn')
+                            subject_record.features.append(feature)
+                            annotated = True
+        return annotated
 
-    def blastp_annotate(self, tag_sequences, subject_record, evalue=0.001, table=11, **kwargs):
+    def blastp_annotate(self, tag_sequences, subject_record, min_identity, evalue=0.001, table=11, **kwargs):
         # translate subject in six frames
         with user_message('Translating whole genome in 6 reading frames', '\n'):
             translator = Translator(self._abort_event)
             translation = translator.translate_six_frames(subject_record, table)
-        if not translation: return None
+        if not translation: return False
         results = self.s2s_blast_batch(tag_sequences, translation, evalue=evalue, command='blastp', **kwargs)
         if results is None: return False
         with user_message('Adding results as annotations...'):
+            annotated = False
             subj_len = len(subject_record)
             for i, tag in enumerate(tag_sequences):
                 if not results[i]: continue
@@ -675,6 +695,7 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
                     for hit in record:
                         for ali in hit.alignments:
                             for hsp in ali.hsps:
+                                if hsp.identities / float(hsp.align_length) < min_identity: continue
                                 if strand == 1:
                                     location = FeatureLocation(start+(hsp.sbjct_start-1)*3,
                                                                start+hsp.sbjct_end*3,
@@ -683,8 +704,10 @@ class BlastCLI(MultiprocessingBase, _BlastBase):
                                     location = FeatureLocation(subj_len-start-hsp.sbjct_end*3,
                                                                subj_len-start-hsp.sbjct_start*3,
                                                                strand)
-                                feature = self.hsp2feature(tag_name, 'blastp_annotations', location, hsp, 3)
+                                feature = self.hsp2feature(tag_name, 'blastp_annotations', location, hsp)
+                                self.add_program(feature, 'blastp')
                                 subject_record.features.append(feature)
-        return True
+                                annotated = True
+        return annotated
 
 #end class
