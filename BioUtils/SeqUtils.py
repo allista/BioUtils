@@ -15,7 +15,7 @@ from Bio import SeqIO
 from Bio.Seq import Seq
 from Bio.SeqRecord import SeqRecord
 from Bio.SeqFeature import SeqFeature, FeatureLocation
-from Bio.Alphabet import generic_alphabet, generic_dna, generic_protein
+from Bio.Alphabet import generic_alphabet, generic_dna, generic_protein, ProteinAlphabet, DNAAlphabet, NucleotideAlphabet
 from Bio.Data.IUPACData import ambiguous_dna_letters, ambiguous_rna_letters, extended_protein_letters
 
 from .Tools.Multiprocessing import MultiprocessingBase, ordered_shelved_results_assembler
@@ -45,11 +45,16 @@ class SeqLoader(MultiprocessingBase, FilenameParser):
     def guess_alphabet(cls, seq):
         letters = set(seq[:10].upper()) # use just first 10 letters
         nletters = len(letters)
-        if len(letters.intersection(cls.protein_letters)) == nletters:
-            return generic_protein
         if len(letters.intersection(cls.dna_letters)) == nletters:
             return generic_dna
+        if len(letters.intersection(cls.protein_letters)) == nletters:
+            return generic_protein
         return generic_alphabet
+
+    @classmethod
+    def correct_alphabet(cls, seq):
+        cls._set_alphabet(seq, cls.guess_alphabet(seq))
+        return seq
 
     @classmethod
     def _set_alphabet(cls, rec, abc):
@@ -63,9 +68,10 @@ class SeqLoader(MultiprocessingBase, FilenameParser):
             return None
         if not schema: schema = cls.guess_schema(filename) 
         try:
-            recs = list(SeqIO.parse(filename, schema))
             if guess_alphabet:
-                recs = [cls._set_alphabet(rec, cls.guess_alphabet(rec)) for rec in recs]
+                recs = list(cls.correct_alphabet(rec) for rec in SeqIO.parse(filename, schema))
+            else:
+                recs = list(SeqIO.parse(filename, schema))
             return recs
         except Exception, e:
             print 'Unable to parse %s as %s\n%s' % (filename, schema, str(e))
@@ -309,12 +315,6 @@ class Translator(MultiprocessingBase):
         return trec
 
     @staticmethod
-    @MultiprocessingBase.data_mapper
-    @shelf_result
-    def _translate_sixframe_seq_mapper(i, recs, table):
-        return Translator._translate_sixframe_seq(i, recs, table)
-
-    @staticmethod
     def translate(record, table):
         rem = len(record) % 3
         if rem > 0: record = record[:-rem]
@@ -325,6 +325,18 @@ class Translator(MultiprocessingBase):
                          description=record.description,
                          annotations=record.annotations)
         return trec
+
+    def translate_records(self, records, table):
+        @MultiprocessingBase.data_mapper
+        @shelf_result
+        def worker(i, recs):
+            return Translator.translate(recs[i], table)
+        translation = [None]*len(records)
+        work = self.Work()
+        work.start_work(worker, range(len(records)), None, records)
+        work.assemble(ordered_shelved_results_assembler, translation)
+        if not work.wait(): return None
+        return translation
 
     def translate_features(self, rec, features=None, table='Standard', join=False, gap='X' * 20):
         if features is None: features = rec.features
@@ -360,11 +372,16 @@ class Translator(MultiprocessingBase):
                 self._get_frame(revcomp, 2, True)]
         return recs
 
+    _frames = (0,1,2,3,4,5)
+
     def translate_six_frames(self, rec, table='Standard'):
-        recs = self._get_six_frames(rec)
+        @MultiprocessingBase.data_mapper
+        @shelf_result
+        def worker(i, frames):
+            return Translator._translate_sixframe_seq(i, frames, table)
         translation = [None] * 6
         work = self.Work()
-        work.start_work(self._translate_sixframe_seq_mapper, range(0, 6), None, recs, table)
+        work.start_work(worker, self._frames, None, self._get_six_frames(rec))
         work.assemble(ordered_shelved_results_assembler, translation)
         if not work.wait(): return None
         return translation
@@ -372,7 +389,7 @@ class Translator(MultiprocessingBase):
     def translate_six_frames_single(self, rec, table='Standard'):
         '''Single-process variant of translate_six_frames'''
         recs = self._get_six_frames(rec)
-        return [self._translate_sixframe_seq(i, recs, table) for i in range(6)]
+        return [self._translate_sixframe_seq(i, recs, table) for i in self._frames]
 
     
 def load_dir(abort_event, dirname, schema=None, namefilter=None, flatten=True, guess_alphabet=False):
@@ -383,6 +400,24 @@ def load_dir(abort_event, dirname, schema=None, namefilter=None, flatten=True, g
 def load_files(abort_event, filenames, schema=None, flatten=True, guess_alphabet=False):
     loader = SeqLoader(abort_event)
     return loader.load_files(filenames, schema, flatten, guess_alphabet)
+
+
+def common_alphabet(seqs):
+    alphabets = set()
+    last = None
+    for s in seqs:
+        if isinstance(s.seq.alphabet, ProteinAlphabet):
+            last = ProteinAlphabet
+            alphabets.add(1)
+        elif isinstance(s.seq.alphabet, NucleotideAlphabet):
+            last = NucleotideAlphabet
+            alphabets.add(2)
+        else:
+            last = type(s.seq.alphabet)
+            alphabets.add(type)
+        if len(alphabets) > 1:
+            return False, None
+    return True, last
 
 
 def mktmp_fasta(rec, register=True):
@@ -434,6 +469,11 @@ def safe_write(records, filename, schema=None):
         print 'Unable to write records to %s\n%s\n' % (filename, str(e))
         return False
     return True
+
+def backup_write(records, filename, schema=None):
+    if os.path.isfile(filename):
+        os.rename(filename, filename + '.back')
+    return safe_write(records, filename)
 
 def features_of_type(record, ftype):
     return [f for f in record.features if f.type == ftype]
@@ -491,12 +531,16 @@ def simple_feature(start, end, fid='<unknown id>', ftype='misc_feature', qualifi
     return SeqFeature(loc, type=ftype, id=fid, qualifiers=qualifiers)
 
 
+_illegal = re.compile(r'[=/]')
+
 def pretty_rec_name(rec):
 #    print 'source: %s, id %s, desc %s' % (rec.annotations.get('source'), rec.id, rec.description)#test
     if rec.description is None: rec.description = ''
-    return (rec.annotations.get('source') 
+    name = (rec.annotations.get('source')
             or rec.description.replace(rec.id, '').strip() 
             or rec.id)
+    name = _illegal.sub('-', name)
+    return name
 
 def rec_name_with_id(rec):
     return '%s (%s)' % (pretty_rec_name(rec), rec.id)
