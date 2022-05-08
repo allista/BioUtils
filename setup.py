@@ -23,7 +23,7 @@ setup(name='BioUtils',
       license='GPL-3',
       author='Allis Tauri',
       author_email='allista@gmail.com',
-      #url='https://launchpad.net/degenprimer',
+      url='https://github.com/allista/BioUtils',
       classifiers=[
         'Development Status :: 3 - Alpha',
         'Topic :: Scientific/Engineering :: Bio-Informatics',
