@@ -7,9 +7,9 @@ Created on Jul 9, 2012
 @author: Allis Tauri <allista@gmail.com>
 '''
 
-# Utility function to read the README file.
+# Utility function to read the README.md file.
 # Used for the long_description.  It's nice, because now 1) we have a top level
-# README file and 2) it's easier to type in the README file than to put a raw
+# README.md file and 2) it's easier to type in the README.md file than to put a raw
 # string in below ...
 import os
 def read(fname):
@@ -19,7 +19,7 @@ from distutils.core import setup
 setup(name='BioUtils',
       version='1.4',
       description='A utility library and a set of scripts for everyday bioinformatic routine.',
-      long_description=read('README'),
+      long_description=read('README.md'),
       license='GPL-3',
       author='Allis Tauri',
       author_email='allista@gmail.com',
