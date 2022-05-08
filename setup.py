@@ -30,7 +30,6 @@ setup(name='BioUtils',
         'Intended Audience :: Science/Research',
         'Operating System :: POSIX',
         'Programming Language :: Python'],
-#      install_require=['biopython>=1.6', 'dendropy>=4.0', 'numpy', 'scipy'],
       packages=['BioUtils', 'BioUtils.HMMER3', 'BioUtils.KEGG', 'BioUtils.NCBI', 'BioUtils.Tools'],
       scripts=['seqconv',
                'align_as_amino',
@@ -55,5 +54,4 @@ setup(name='BioUtils',
                'translate_seqs',
                'fetch_accessions',
                ],
-      #data_files=[('share/applications', ['DegenPrimer.desktop'])]
       )
