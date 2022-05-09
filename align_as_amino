@@ -19,7 +19,7 @@ try:
 except:
     print "The BioPython must be installed in your system for this script to work."
     sys.exit(1)
-from BioUtils.Alignment import Alignment
+from BioUtils.AlignmentUtils import AlignmentUtils
 
 if __name__ == '__main__':
     #parse command line arguments
@@ -71,7 +71,7 @@ if __name__ == '__main__':
     
     
     #allign nucleotide sequence as amino-asid sequence
-    alignment = Alignment()
+    alignment = AlignmentUtils()
     aligned_seqs = alignment.align_translated(sequences.values(), args.trans_table, args.force_table) 
     
     

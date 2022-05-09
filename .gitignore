@@ -7,7 +7,8 @@
 *.ods
 *.cli
 
-/build/**
+/build
 
-/Tests/results/**
-/Tests/data/**
+/Tests/results
+/Tests/data
+/BioUtils.egg-info
